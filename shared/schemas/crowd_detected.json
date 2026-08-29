@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cctv-ai-intelligent-surveillance.local/schemas/crowd_detected.json",
+  "title": "Crowd Detected Event",
+  "description": "Event generated when the Crowd Agent detects unusually high crowd density.",
+  "allOf": [
+    {
+      "$ref": "base_event.json"
+    },
+    {
+      "type": "object",
+      "properties": {
+        "event_type": {
+          "const": "crowd.detected"
+        },
+        "data": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "frame_id",
+            "person_count",
+            "density",
+            "threshold",
+            "severity"
+          ],
+          "properties": {
+            "frame_id": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Identifier of the video frame used for the crowd analysis."
+            },
+            "person_count": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Number of tracked people detected in the analyzed area."
+            },
+            "density": {
+              "type": "number",
+              "minimum": 0,
+              "description": "Calculated crowd density."
+            },
+            "threshold": {
+              "type": "number",
+              "minimum": 0,
+              "description": "Configured crowd density threshold."
+            },
+            "severity": {
+              "type": "string",
+              "enum": [
+                "low",
+                "medium",
+                "high",
+                "critical"
+              ],
+              "description": "Severity assigned to the crowd condition."
+            },
+            "track_ids": {
+              "type": "array",
+              "description": "IDs of tracked people contributing to the crowd condition.",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}
