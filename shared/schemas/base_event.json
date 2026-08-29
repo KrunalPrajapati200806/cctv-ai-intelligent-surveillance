@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cctv-ai-intelligent-surveillance.local/schemas/base_event.json",
+  "title": "CCTV AI Base Event",
+  "description": "Base event contract used for communication between CCTV AI agents and backend services.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "event_id",
+    "event_type",
+    "version",
+    "timestamp",
+    "source",
+    "camera",
+    "data"
+  ],
+  "properties": {
+    "event_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Unique identifier for the event."
+    },
+    "event_type": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Event type identifier."
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+$",
+      "description": "Event contract version."
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "UTC timestamp when the event was generated."
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "agent_id"
+      ],
+      "properties": {
+        "agent_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Unique identifier of the agent or service producing the event."
+        }
+      }
+    },
+    "camera": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "camera_id"
+      ],
+      "properties": {
+        "camera_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Unique identifier of the CCTV camera."
+        }
+      }
+    },
+    "data": {
+      "type": "object",
+      "description": "Event-specific payload."
+    }
+  }
+}
