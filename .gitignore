@@ -1,61 +1,101 @@
+﻿# ==============================
 # Python
+# ==============================
 __pycache__/
 *.py[cod]
 *.pyo
 *.pyd
 .pytest_cache/
 .mypy_cache/
+.ruff_cache/
 
 # Virtual environments
 .venv/
 venv/
 env/
 
-# Environment variables
+# ==============================
+# Secrets / environment
+# ==============================
 .env
+.env.*
+!.env.example
 
-# Node
-node_modules/
-npm-debug.log*
-dist/
-build/
-
-# IDE
+# ==============================
+# IDE / OS
+# ==============================
 .vscode/
 .idea/
-
-# OS
+*.swp
+*.swo
 .DS_Store
 Thumbs.db
+Desktop.ini
 
-# CCTV videos
+# ==============================
+# Runtime databases
+# ==============================
+*.db
+*.sqlite
+*.sqlite3
+
+# ==============================
+# Runtime / generated CCTV data
+# ==============================
 data/videos/*
+data/recorded_videos/*
+data/proof_videos/*
+data/historical_jobs/*
+data/heartbeat_tests/*
+
+# Keep directory placeholders
 !data/videos/.gitkeep
+!data/recorded_videos/.gitkeep
+!data/proof_videos/.gitkeep
+!data/historical_jobs/.gitkeep
+!data/heartbeat_tests/.gitkeep
 
-# Generated evidence
-data/evidence/*
-!data/evidence/.gitkeep
+# ==============================
+# Temporary files
+# ==============================
+*.tmp
+*.temp
+*.bak
+*.backup
+*.old
 
-# Sample/generated files
-data/samples/*
-!data/samples/.gitkeep
+# ==============================
+# ML model weights
+# ==============================
+*.pt
+*.onnx
+*.engine
+*.weights
 
-# ML model files
-models/**/*.pt
-models/**/*.pth
-models/**/*.onnx
-models/**/*.bin
-models/**/*.safetensors
+# ==============================
+# Video / image runtime artifacts
+# ==============================
+data/**/*.mp4
+data/**/*.avi
+data/**/*.mov
+data/**/*.mkv
+data/**/*.webm
 
+camera_latest.jpg
+download_test.mp4
+
+# ==============================
+# Frontend
+# ==============================
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# ==============================
 # Logs
+# ==============================
 *.log
 logs/
 
-# Temporary files
-*.tmp
-*.temp
-
-# Coverage
-htmlcov/
-.coverage
-coverage.xml
+# Node.js dependencies
+node_modules/

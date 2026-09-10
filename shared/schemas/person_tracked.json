@@ -36,7 +36,8 @@
                   "track_id",
                   "detection_id",
                   "bbox",
-                  "confidence"
+                  "confidence",
+                  "center"
                 ],
                 "properties": {
                   "track_id": {

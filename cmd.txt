@@ -1,0 +1,29 @@
+# ============================================
+# CCTV AI Intelligent Surveillance
+# Local Development Commands
+# ============================================
+
+# 1. Backend
+# Run from project root in a new terminal:
+$env:PYTHONPATH = "$((Get-Location).Path);$((Get-Location).Path)\backend"
+python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000 --reload
+
+
+# 2. Frontend
+# Run from frontend directory:
+npm run dev
+
+
+# 3. Camera Detection Agent
+# Run from project root in a new terminal:
+$env:CAMERA_ID="CAM01"
+$env:CAMERA_NAME="Laptop Camera"
+$env:CAMERA_LOCATION="Test Desk"
+$env:CAMERA_SOURCE="0"
+$env:SHOW_CAMERA="true"
+python -m agents.detection.main
+
+
+# 4. Messaging Consumer
+# Run from project root in a new terminal:
+python -c "import asyncio; from backend.app.messaging.consumer import consume_events; asyncio.run(consume_events())"

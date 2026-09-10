@@ -1,0 +1,303 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: Arial, Helvetica, sans-serif;
+  background: #0b1120;
+  color: #e5e7eb;
+}
+
+button {
+  font: inherit;
+}
+
+.app {
+  min-height: 100vh;
+}
+
+.topbar {
+  height: 76px;
+  padding: 0 32px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: #111827;
+  border-bottom: 1px solid #1f2937;
+}
+
+.topbar h1 {
+  margin: 0;
+  font-size: 22px;
+}
+
+.topbar p {
+  margin: 5px 0 0;
+  color: #94a3b8;
+  font-size: 13px;
+}
+
+.system-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #86efac;
+  font-size: 14px;
+}
+
+.status-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #22c55e;
+}
+
+.dashboard {
+  max-width: 1400px;
+  margin: auto;
+  padding: 28px;
+}
+
+.stats {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 18px;
+  margin-bottom: 24px;
+}
+
+.stat-card {
+  padding: 20px;
+  background: #111827;
+  border: 1px solid #1f2937;
+  border-radius: 12px;
+}
+
+.stat-card span {
+  color: #94a3b8;
+  font-size: 13px;
+}
+
+.stat-card strong {
+  display: block;
+  margin-top: 8px;
+  font-size: 30px;
+}
+
+.stat-card.danger strong {
+  color: #f87171;
+}
+
+.stat-card.warning strong {
+  color: #fbbf24;
+}
+
+.stat-card.success strong {
+  color: #4ade80;
+}
+
+.camera-panel,
+.incidents-panel {
+  background: #111827;
+  border: 1px solid #1f2937;
+  border-radius: 12px;
+  margin-bottom: 24px;
+  overflow: hidden;
+}
+
+.panel-header {
+  padding: 18px 20px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-bottom: 1px solid #1f2937;
+}
+
+.panel-header h2 {
+  margin: 0;
+  font-size: 17px;
+}
+
+.panel-header span {
+  display: block;
+  margin-top: 4px;
+  color: #64748b;
+  font-size: 12px;
+}
+
+.panel-header button,
+.incident-actions button {
+  border: 0;
+  border-radius: 7px;
+  padding: 8px 13px;
+  background: #2563eb;
+  color: white;
+  cursor: pointer;
+}
+
+.panel-header button:hover,
+.incident-actions button:hover {
+  background: #1d4ed8;
+}
+
+.live-badge {
+  color: #f87171 !important;
+  font-weight: bold;
+}
+
+.camera-view {
+  height: 420px;
+  position: relative;
+  background:
+    linear-gradient(
+      135deg,
+      #020617,
+      #172033
+    );
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.camera-overlay {
+  position: absolute;
+  top: 14px;
+  left: 16px;
+  right: 16px;
+  display: flex;
+  justify-content: space-between;
+  color: #cbd5e1;
+  font-size: 12px;
+}
+
+.camera-placeholder {
+  text-align: center;
+  color: #64748b;
+}
+
+.camera-icon {
+  font-size: 48px;
+  color: #334155;
+}
+
+.camera-placeholder h3 {
+  margin: 10px 0 5px;
+  color: #94a3b8;
+}
+
+.camera-placeholder p {
+  margin: 0;
+  font-size: 13px;
+}
+
+.incident-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.incident-card {
+  padding: 20px;
+  display: flex;
+  justify-content: space-between;
+  gap: 20px;
+  border-bottom: 1px solid #1f2937;
+}
+
+.incident-card:last-child {
+  border-bottom: 0;
+}
+
+.incident-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.incident-title h3 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.incident-main p {
+  color: #94a3b8;
+  margin: 9px 0;
+}
+
+.incident-meta {
+  display: flex;
+  gap: 18px;
+  color: #64748b;
+  font-size: 12px;
+}
+
+.severity,
+.status {
+  display: inline-block;
+  padding: 5px 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: bold;
+}
+
+.severity.low {
+  background: #172554;
+  color: #60a5fa;
+}
+
+.severity.medium {
+  background: #451a03;
+  color: #fbbf24;
+}
+
+.severity.high {
+  background: #450a0a;
+  color: #f87171;
+}
+
+.status.OPEN {
+  background: #450a0a;
+  color: #f87171;
+}
+
+.status.ACKNOWLEDGED {
+  background: #451a03;
+  color: #fbbf24;
+}
+
+.status.RESOLVED {
+  background: #052e16;
+  color: #4ade80;
+}
+
+.incident-actions {
+  min-width: 130px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 10px;
+}
+
+.empty,
+.error {
+  padding: 30px;
+  text-align: center;
+  color: #94a3b8;
+}
+
+.error {
+  color: #f87171;
+}
+
+@media (max-width: 800px) {
+  .stats {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .incident-card {
+    flex-direction: column;
+  }
+
+  .incident-actions {
+    align-items: flex-start;
+  }
+}

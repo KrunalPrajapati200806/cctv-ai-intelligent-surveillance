@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://cctv-ai-intelligent-surveillance.local/schemas/base_event.json",
+  "$id": "https://cctv-ai.local/schemas/base-event.json",
   "title": "CCTV AI Base Event",
-  "description": "Base event contract used for communication between CCTV AI agents and backend services.",
+  "description": "Canonical event envelope used by the CCTV AI platform.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -12,43 +12,54 @@
     "timestamp",
     "source",
     "camera",
+    "context",
     "data"
   ],
   "properties": {
     "event_id": {
       "type": "string",
-      "minLength": 1,
-      "description": "Unique identifier for the event."
+      "minLength": 1
     },
+
     "event_type": {
       "type": "string",
-      "minLength": 1,
-      "description": "Event type identifier."
+      "minLength": 1
     },
+
     "version": {
       "type": "string",
-      "pattern": "^[0-9]+\\.[0-9]+$",
-      "description": "Event contract version."
+      "pattern": "^[0-9]+\\.[0-9]+$"
     },
+
     "timestamp": {
       "type": "string",
-      "format": "date-time",
-      "description": "UTC timestamp when the event was generated."
+      "format": "date-time"
     },
+
     "source": {
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "agent_id"
+        "agent_id",
+        "instance_id",
+        "hostname"
       ],
       "properties": {
         "agent_id": {
           "type": "string",
-          "minLength": 1,
-          "description": "Unique identifier of the agent or service producing the event."
+          "minLength": 1
+        },
+        "instance_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "hostname": {
+          "type": "string",
+          "minLength": 1
         }
       }
     },
+
     "camera": {
       "type": "object",
       "additionalProperties": false,
@@ -58,14 +69,51 @@
       "properties": {
         "camera_id": {
           "type": "string",
-          "minLength": 1,
-          "description": "Unique identifier of the CCTV camera."
+          "minLength": 1
         }
       }
     },
-    "data": {
+
+    "context": {
       "type": "object",
-      "description": "Event-specific payload."
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "trace_id",
+        "correlation_id"
+      ],
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "live",
+            "historical"
+          ]
+        },
+
+        "trace_id": {
+          "type": "string",
+          "minLength": 1
+        },
+
+        "correlation_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+
+        "incident_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+
+    "data": {
+      "type": "object"
     }
   }
 }

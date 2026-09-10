@@ -1,0 +1,9 @@
+New-Item -ItemType Directory -Force ".\data\historical_jobs" | Out-Null
+New-Item -ItemType Directory -Force ".\data\proof_videos" | Out-Null
+New-Item -ItemType Directory -Force ".\data\recorded_videos" | Out-Null
+New-Item -ItemType Directory -Force ".\data\videos" | Out-Null
+
+New-Item -ItemType File -Force ".\data\historical_jobs\.gitkeep" | Out-Null
+New-Item -ItemType File -Force ".\data\proof_videos\.gitkeep" | Out-Null
+New-Item -ItemType File -Force ".\data\recorded_videos\.gitkeep" | Out-Null
+New-Item -ItemType File -Force ".\data\videos\.gitkeep" | Out-Null
