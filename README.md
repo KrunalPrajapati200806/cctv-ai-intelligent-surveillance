@@ -126,8 +126,6 @@ The platform follows a frontend-backend architecture.
 
 ## 📂 Project Structure
 
-The following is a reference structure. Adjust it to match the actual files in your repository.
-
 ```text
 cctv-ai-intelligent-surveillance/
 │
