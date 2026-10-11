@@ -1,1173 +1,3 @@
-# # import asyncio
-# # import json
-# # import os
-# # import uuid
-# # import time
-
-# # import redis.asyncio as redis
-
-
-# # # ============================================================
-# # # CONFIG
-# # # ============================================================
-
-# # REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
-# # REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
-
-# # INPUT_STREAM = "events.detection"
-# # OUTPUT_STREAM = "events.tracking"
-
-# # GROUP_NAME = "tracker-workers"
-# # CONSUMER_NAME = "tracker-01"
-
-# # BBOX_DISTANCE_THRESHOLD = float(
-# #     os.getenv("BBOX_DISTANCE_THRESHOLD", "160")
-# # )
-
-# # TRACK_TIMEOUT_SECONDS = float(
-# #     os.getenv("TRACK_TIMEOUT_SECONDS", "0.8")
-# # )
-
-
-# # # ============================================================
-# # # TRACK STATE
-# # # ============================================================
-
-# # tracks = {}
-
-
-# # # ============================================================
-# # # REDIS CONSUMER GROUP
-# # # ============================================================
-
-# # async def ensure_consumer_group(redis_client):
-
-# #     try:
-
-# #         await redis_client.xgroup_create(
-# #             name=INPUT_STREAM,
-# #             groupname=GROUP_NAME,
-# #             id="0",
-# #             mkstream=True,
-# #         )
-
-# #         print(
-# #             f"Created consumer group: {GROUP_NAME}"
-# #         )
-
-# #     except redis.ResponseError as exc:
-
-# #         if "BUSYGROUP" in str(exc):
-
-# #             print(
-# #                 f"Consumer group already exists: "
-# #                 f"{GROUP_NAME}"
-# #             )
-
-# #         else:
-# #             raise
-
-
-# # # ============================================================
-# # # BBOX CENTER
-# # # ============================================================
-
-# # def bbox_center(bbox):
-
-# #     x1, y1, x2, y2 = bbox
-
-# #     return (
-# #         (x1 + x2) / 2,
-# #         (y1 + y2) / 2,
-# #     )
-
-
-# # # ============================================================
-# # # BBOX DISTANCE
-# # # ============================================================
-
-# # def bbox_distance(bbox1, bbox2):
-
-# #     x1, y1 = bbox_center(bbox1)
-# #     x2, y2 = bbox_center(bbox2)
-
-# #     dx = x1 - x2
-# #     dy = y1 - y2
-
-# #     return (dx ** 2 + dy ** 2) ** 0.5
-
-
-# # # ============================================================
-# # # REMOVE EXPIRED TRACKS
-# # # ============================================================
-
-# # def remove_expired_tracks(camera_id, now):
-
-# #     camera_tracks = tracks.get(camera_id)
-
-# #     if not camera_tracks:
-# #         return
-
-# #     expired_track_ids = []
-
-# #     for track_id, track in camera_tracks.items():
-
-# #         age = now - track["last_seen"]
-
-# #         if age > TRACK_TIMEOUT_SECONDS:
-
-# #             expired_track_ids.append(track_id)
-
-# #     for track_id in expired_track_ids:
-
-# #         del camera_tracks[track_id]
-
-# #         print(
-# #             f"Expired track: {track_id} | "
-# #             f"Camera={camera_id}"
-# #         )
-
-# #     if not camera_tracks:
-
-# #         tracks.pop(camera_id, None)
-
-
-# # # ============================================================
-# # # FIND MATCHING TRACK
-# # # ============================================================
-
-# # def find_matching_track(camera_id, bbox):
-
-# #     camera_tracks = tracks.get(camera_id, {})
-
-# #     best_track_id = None
-# #     best_distance = None
-
-# #     for track_id, track in camera_tracks.items():
-
-# #         distance = bbox_distance(
-# #             bbox,
-# #             track["bbox"],
-# #         )
-
-# #         if distance <= BBOX_DISTANCE_THRESHOLD:
-
-# #             if (
-# #                 best_distance is None
-# #                 or distance < best_distance
-# #             ):
-
-# #                 best_track_id = track_id
-# #                 best_distance = distance
-
-# #     return best_track_id
-
-
-# # # ============================================================
-# # # CREATE OR UPDATE TRACK
-# # # ============================================================
-
-# # def get_or_create_track(
-# #     camera_id,
-# #     bbox,
-# #     now,
-# # ):
-
-# #     # IMPORTANT:
-# #     # Never directly assume tracks[camera_id] exists.
-
-# #     camera_tracks = tracks.setdefault(
-# #         camera_id,
-# #         {},
-# #     )
-
-# #     matching_track_id = find_matching_track(
-# #         camera_id,
-# #         bbox,
-# #     )
-
-# #     if matching_track_id:
-
-# #         camera_tracks[
-# #             matching_track_id
-# #         ]["bbox"] = bbox
-
-# #         camera_tracks[
-# #             matching_track_id
-# #         ]["last_seen"] = now
-
-# #         return matching_track_id
-
-# #     track_id = f"track-{uuid.uuid4()}"
-
-# #     camera_tracks[track_id] = {
-# #         "bbox": bbox,
-# #         "last_seen": now,
-# #     }
-
-# #     return track_id
-
-
-# # # ============================================================
-# # # PROCESS ONE DETECTION EVENT
-# # # ============================================================
-
-# # async def process_detection_event(
-# #     redis_client,
-# #     event,
-# # ):
-
-# #     # --------------------------------------------------------
-# #     # CAMERA
-# #     # --------------------------------------------------------
-
-# #     camera = event.get("camera")
-
-# #     if not isinstance(camera, dict):
-
-# #         print(
-# #             "Ignoring event with invalid camera"
-# #         )
-
-# #         return
-
-# #     camera_id = camera.get("camera_id")
-
-# #     if not camera_id:
-
-# #         print(
-# #             "Ignoring event without camera_id"
-# #         )
-
-# #         return
-
-# #     # --------------------------------------------------------
-# #     # DATA
-# #     # --------------------------------------------------------
-
-# #     data = event.get("data")
-
-# #     if not isinstance(data, dict):
-
-# #         print(
-# #             f"Ignoring event with invalid data | "
-# #             f"Camera={camera_id}"
-# #         )
-
-# #         return
-
-# #     frame_id = data.get("frame_id")
-
-# #     if not frame_id:
-
-# #         print(
-# #             f"Ignoring event without frame_id | "
-# #             f"Camera={camera_id}"
-# #         )
-
-# #         return
-
-# #     detections = data.get("detections")
-
-# #     if not isinstance(detections, list):
-
-# #         print(
-# #             f"Ignoring event with invalid detections | "
-# #             f"Camera={camera_id}"
-# #         )
-
-# #         return
-
-# #     # --------------------------------------------------------
-# #     # TIME
-# #     # --------------------------------------------------------
-
-# #     now = time.monotonic()
-
-# #     # --------------------------------------------------------
-# #     # REMOVE OLD TRACKS
-# #     # --------------------------------------------------------
-
-# #     remove_expired_tracks(
-# #         camera_id,
-# #         now,
-# #     )
-
-# #     # --------------------------------------------------------
-# #     # TRACK PEOPLE
-# #     # --------------------------------------------------------
-
-# #     tracked_people = []
-
-# #     for detection in detections:
-
-# #         if not isinstance(detection, dict):
-# #             continue
-
-# #         detection_id = detection.get(
-# #             "detection_id"
-# #         )
-
-# #         bbox = detection.get("bbox")
-
-# #         confidence = detection.get(
-# #             "confidence"
-# #         )
-
-# #         if not detection_id:
-
-# #             print(
-# #                 "Skipping detection without "
-# #                 "detection_id"
-# #             )
-
-# #             continue
-
-# #         if (
-# #             not isinstance(bbox, list)
-# #             or len(bbox) != 4
-# #         ):
-
-# #             print(
-# #                 f"Skipping invalid bbox | "
-# #                 f"Detection={detection_id}"
-# #             )
-
-# #             continue
-
-# #         try:
-
-# #             bbox = [
-# #                 float(value)
-# #                 for value in bbox
-# #             ]
-
-# #         except (
-# #             TypeError,
-# #             ValueError,
-# #         ):
-
-# #             print(
-# #                 f"Skipping non-numeric bbox | "
-# #                 f"Detection={detection_id}"
-# #             )
-
-# #             continue
-
-# #         if not isinstance(
-# #             confidence,
-# #             (int, float),
-# #         ):
-
-# #             print(
-# #                 f"Skipping invalid confidence | "
-# #                 f"Detection={detection_id}"
-# #             )
-
-# #             continue
-
-# #         # ----------------------------------------------------
-# #         # TRACK
-# #         # ----------------------------------------------------
-
-# #         track_id = get_or_create_track(
-# #             camera_id,
-# #             bbox,
-# #             now,
-# #         )
-
-# #         center = bbox_center(bbox)
-
-# #         tracked_people.append(
-# #             {
-# #                 "track_id": track_id,
-# #                 "detection_id": detection_id,
-# #                 "bbox": bbox,
-# #                 "confidence": float(
-# #                     confidence
-# #                 ),
-# #                 "center": [
-# #                     float(center[0]),
-# #                     float(center[1]),
-# #                 ],
-# #             }
-# #         )
-
-# #         print(
-# #             f"TRACK | "
-# #             f"Camera={camera_id} | "
-# #             f"Detection={detection_id} | "
-# #             f"Track={track_id}"
-# #         )
-
-# #     # --------------------------------------------------------
-# #     # NO PEOPLE
-# #     # --------------------------------------------------------
-
-# #     if not tracked_people:
-
-# #         return
-
-# #     # --------------------------------------------------------
-# #     # CREATE TRACKING EVENT
-# #     # --------------------------------------------------------
-
-# #     tracked_event = {
-
-# #         "event_id": str(
-# #             uuid.uuid4()
-# #         ),
-
-# #         "event_type": "person.tracked",
-
-# #         "version": "1.0",
-
-# #         "timestamp": event.get(
-# #             "timestamp"
-# #         ),
-
-# #         "source": {
-# #             "agent_id": CONSUMER_NAME,
-# #         },
-
-# #         "camera": {
-# #             "camera_id": camera_id,
-# #         },
-
-# #         "data": {
-
-# #             "frame_id": frame_id,
-
-# #             "tracks": tracked_people,
-# #         },
-# #     }
-
-# #     # --------------------------------------------------------
-# #     # PUBLISH
-# #     # --------------------------------------------------------
-
-# #     output_id = await redis_client.xadd(
-# #         OUTPUT_STREAM,
-# #         {
-# #             "event": json.dumps(
-# #                 tracked_event
-# #             )
-# #         },
-# #     )
-
-# #     print(
-# #         f"TRACKED EVENT | "
-# #         f"Camera={camera_id} | "
-# #         f"Persons={len(tracked_people)} | "
-# #         f"Redis={output_id}"
-# #     )
-
-
-# # # ============================================================
-# # # MAIN
-# # # ============================================================
-
-# # async def main():
-
-# #     redis_client = redis.Redis(
-
-# #         host=REDIS_HOST,
-
-# #         port=REDIS_PORT,
-
-# #         decode_responses=True,
-
-# #         socket_connect_timeout=5,
-
-# #         socket_timeout=None,
-# #     )
-
-# #     await ensure_consumer_group(
-# #         redis_client
-# #     )
-
-# #     print("=" * 60)
-
-# #     print(
-# #         f"Tracker started: {CONSUMER_NAME}"
-# #     )
-
-# #     print(
-# #         f"Input stream: {INPUT_STREAM}"
-# #     )
-
-# #     print(
-# #         f"Output stream: {OUTPUT_STREAM}"
-# #     )
-
-# #     print(
-# #         f"BBOX distance threshold: "
-# #         f"{BBOX_DISTANCE_THRESHOLD}"
-# #     )
-
-# #     print(
-# #         f"Track timeout: "
-# #         f"{TRACK_TIMEOUT_SECONDS}s"
-# #     )
-
-# #     print("=" * 60)
-
-# #     try:
-
-# #         while True:
-
-# #             try:
-
-# #                 messages = (
-# #                     await redis_client.xreadgroup(
-
-# #                         groupname=GROUP_NAME,
-
-# #                         consumername=CONSUMER_NAME,
-
-# #                         streams={
-# #                             INPUT_STREAM: ">"
-# #                         },
-
-# #                         count=10,
-
-# #                         block=5000,
-# #                     )
-# #                 )
-
-# #             except redis.exceptions.TimeoutError:
-
-# #                 print(
-# #                     "Redis read timeout; "
-# #                     "continuing..."
-# #                 )
-
-# #                 continue
-
-# #             if not messages:
-# #                 continue
-
-# #             for (
-# #                 stream_name,
-# #                 stream_messages,
-# #             ) in messages:
-
-# #                 for (
-# #                     redis_id,
-# #                     fields,
-# #                 ) in stream_messages:
-
-# #                     try:
-
-# #                         raw_event = fields.get(
-# #                             "event"
-# #                         )
-
-# #                         if not raw_event:
-
-# #                             print(
-# #                                 f"Missing event "
-# #                                 f"payload: "
-# #                                 f"{redis_id}"
-# #                             )
-
-# #                             await redis_client.xack(
-# #                                 INPUT_STREAM,
-# #                                 GROUP_NAME,
-# #                                 redis_id,
-# #                             )
-
-# #                             continue
-
-# #                         event = json.loads(
-# #                             raw_event
-# #                         )
-
-# #                         event_type = event.get(
-# #                             "event_type"
-# #                         )
-
-# #                         if event_type != "person.detected":
-
-# #                             print(
-# #                                 f"Ignoring event type: "
-# #                                 f"{event_type}"
-# #                             )
-
-# #                             await redis_client.xack(
-# #                                 INPUT_STREAM,
-# #                                 GROUP_NAME,
-# #                                 redis_id,
-# #                             )
-
-# #                             continue
-
-# #                         await process_detection_event(
-# #                             redis_client,
-# #                             event,
-# #                         )
-
-# #                         await redis_client.xack(
-# #                             INPUT_STREAM,
-# #                             GROUP_NAME,
-# #                             redis_id,
-# #                         )
-
-# #                     except json.JSONDecodeError as exc:
-
-# #                         print(
-# #                             f"Invalid JSON | "
-# #                             f"Redis={redis_id} | "
-# #                             f"Error={exc}"
-# #                         )
-
-# #                         await redis_client.xack(
-# #                             INPUT_STREAM,
-# #                             GROUP_NAME,
-# #                             redis_id,
-# #                         )
-
-# #                     except Exception as exc:
-
-# #                         print(
-# #                             f"ERROR processing "
-# #                             f"{redis_id} | "
-# #                             f"{type(exc).__name__}: "
-# #                             f"{exc}"
-# #                         )
-
-# #                         # DO NOT ACK.
-# #                         #
-# #                         # The message remains pending
-# #                         # for recovery.
-
-# #     finally:
-
-# #         await redis_client.aclose()
-
-# #         print(
-# #             "Tracker stopped."
-# #         )
-
-
-# # # ============================================================
-# # # ENTRY POINT
-# # # ============================================================
-
-# # if __name__ == "__main__":
-
-# #     asyncio.run(main())
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# import asyncio
-# import math
-# import os
-# import uuid
-
-# from shared.agent.base_agent import BaseAgent
-# from shared.schemas.person_tracked import PersonTrackedData
-
-
-# class PersonTrackerAgent(BaseAgent):
-#     """
-#     Person tracking agent.
-
-#     events.detection
-
-#     person.tracked
-
-#     events.tracking
-#     """
-
-#     def __init__(self):
-#         super().__init__(
-#             agent_id=os.getenv(
-#                 "AGENT_ID",
-#                 "tracker-01",
-#             ),
-#             heartbeat_interval=int(
-#                 os.getenv(
-#                     "HEARTBEAT_INTERVAL",
-#                     "10",
-#                 )
-#             ),
-#         )
-
-#         self.input_stream = "events.detection"
-#         self.output_stream = "events.tracking"
-
-#         self.group_name = os.getenv(
-#             "TRACKER_GROUP",
-#             "tracker-workers",
-#         )
-
-#         self.consumer_name = os.getenv(
-#             "TRACKER_CONSUMER",
-#             f"tracker-{uuid.uuid4().hex[:8]}",
-#         )
-
-#         self.distance_threshold = float(
-#             os.getenv(
-#                 "TRACK_DISTANCE_THRESHOLD",
-#                 "160",
-#             )
-#         )
-
-#         self.track_timeout = float(
-#             os.getenv(
-#                 "TRACK_TIMEOUT",
-#                 "0.8",
-#             )
-#         )
-
-#         self.tracks = {}
-
-#     async def on_start(self):
-#         if not self.redis_client:
-#             raise RuntimeError(
-#                 "Redis client is not initialized."
-#             )
-
-#         try:
-#             await self.redis_client.xgroup_create(
-#                 self.input_stream,
-#                 self.group_name,
-#                 id="0",
-#                 mkstream=True,
-#             )
-#         except Exception as error:
-#             if "BUSYGROUP" not in str(error):
-#                 raise
-
-#         print(
-#             f"[{self.agent_id}] "
-#             f"Tracker ready."
-#         )
-
-#         print(
-#             f"[{self.agent_id}] "
-#             f"Input: {self.input_stream}"
-#         )
-
-#         print(
-#             f"[{self.agent_id}] "
-#             f"Output: {self.output_stream}"
-#         )
-
-#         print(
-#             f"[{self.agent_id}] "
-#             f"Consumer: {self.consumer_name}"
-#         )
-
-#     async def on_stop(self):
-#         self.tracks.clear()
-
-#         print(
-#             f"[{self.agent_id}] "
-#             f"Tracker state cleared."
-#         )
-
-#     def distance(self, center_a, center_b):
-#         return math.sqrt(
-#             (center_a[0] - center_b[0]) ** 2
-#             + (center_a[1] - center_b[1]) ** 2
-#         )
-
-#     def cleanup_tracks(self, camera_id):
-#         camera_tracks = self.tracks.get(
-#             camera_id,
-#             {},
-#         )
-
-#         current_time = asyncio.get_running_loop().time()
-
-#         stale_ids = []
-
-#         for track_id, track in camera_tracks.items():
-#             if (
-#                 current_time - track["last_seen"]
-#                 > self.track_timeout
-#             ):
-#                 stale_ids.append(track_id)
-
-#         for track_id in stale_ids:
-#             del camera_tracks[track_id]
-
-#     def update_tracks(
-#         self,
-#         camera_id,
-#         detections,
-#     ):
-#         if camera_id not in self.tracks:
-#             self.tracks[camera_id] = {}
-
-#         camera_tracks = self.tracks[camera_id]
-
-#         current_time = asyncio.get_running_loop().time()
-
-#         matched_track_ids = set()
-#         output_tracks = []
-
-#         for detection in detections:
-
-#             detection_id = detection.get(
-#                 "detection_id"
-#             )
-
-#             bbox = detection.get("bbox")
-#             confidence = detection.get(
-#                 "confidence"
-#             )
-
-#             if not detection_id:
-#                 continue
-
-#             if (
-#                 not isinstance(bbox, list)
-#                 or len(bbox) != 4
-#             ):
-#                 continue
-
-#             try:
-#                 bbox = [
-#                     float(value)
-#                     for value in bbox
-#                 ]
-
-#                 confidence = float(
-#                     confidence
-#                 )
-
-#             except (
-#                 TypeError,
-#                 ValueError,
-#             ):
-#                 continue
-
-#             center = [
-#                 (bbox[0] + bbox[2]) / 2,
-#                 (bbox[1] + bbox[3]) / 2,
-#             ]
-
-#             best_track_id = None
-#             best_distance = float("inf")
-
-#             for track_id, track in camera_tracks.items():
-
-#                 if track_id in matched_track_ids:
-#                     continue
-
-#                 distance = self.distance(
-#                     center,
-#                     track["center"],
-#                 )
-
-#                 if (
-#                     distance
-#                     < self.distance_threshold
-#                     and distance < best_distance
-#                 ):
-#                     best_distance = distance
-#                     best_track_id = track_id
-
-#             if best_track_id is None:
-
-#                 best_track_id = (
-#                     f"track-"
-#                     f"{uuid.uuid4().hex}"
-#                 )
-
-#                 camera_tracks[
-#                     best_track_id
-#                 ] = {
-#                     "track_id":
-#                         best_track_id,
-#                     "center":
-#                         center,
-#                     "bbox":
-#                         bbox,
-#                     "last_seen":
-#                         current_time,
-#                 }
-
-#             else:
-
-#                 camera_tracks[
-#                     best_track_id
-#                 ]["center"] = center
-
-#                 camera_tracks[
-#                     best_track_id
-#                 ]["bbox"] = bbox
-
-#                 camera_tracks[
-#                     best_track_id
-#                 ]["last_seen"] = current_time
-
-#             matched_track_ids.add(
-#                 best_track_id
-#             )
-
-#             output_tracks.append(
-#                 {
-#                     "track_id":
-#                         best_track_id,
-#                     "detection_id":
-#                         detection_id,
-#                     "bbox":
-#                         bbox,
-#                     "confidence":
-#                         confidence,
-#                     "center":
-#                         center,
-#                 }
-#             )
-
-#         self.cleanup_tracks(
-#             camera_id
-#         )
-
-#         return output_tracks
-
-#     async def process_message(
-#         self,
-#         redis_id,
-#         fields,
-#     ):
-#         try:
-#             raw_event = fields.get(
-#                 "event"
-#             )
-
-#             if not raw_event:
-#                 await self.redis_client.xack(
-#                     self.input_stream,
-#                     self.group_name,
-#                     redis_id,
-#                 )
-#                 return
-
-#             import json
-
-#             event = json.loads(raw_event)
-
-#             if (
-#                 event.get("event_type")
-#                 != "person.detected"
-#             ):
-#                 await self.redis_client.xack(
-#                     self.input_stream,
-#                     self.group_name,
-#                     redis_id,
-#                 )
-#                 return
-
-#             source = event.get(
-#                 "source",
-#                 {},
-#             )
-
-#             camera = event.get(
-#                 "camera",
-#                 {},
-#             )
-
-#             data = event.get(
-#                 "data",
-#                 {},
-#             )
-
-#             camera_id = camera.get(
-#                 "camera_id",
-#                 "CAM01",
-#             )
-
-#             detections = data.get(
-#                 "detections",
-#                 [],
-#             )
-
-#             tracks = self.update_tracks(
-#                 camera_id,
-#                 detections,
-#             )
-
-#             tracked_data = PersonTrackedData(
-#                 frame_id=str(
-#                     data.get(
-#                         "frame_id",
-#                         redis_id,
-#                     )
-#                 ),
-#                 tracks=tracks,
-#             )
-
-#             tracked_event = {
-#                 "event_id": str(
-#                     uuid.uuid4()
-#                 ),
-#                 "event_type":
-#                     "person.tracked",
-#                 "version": "1.0",
-#                 "timestamp":
-#                     self.now(),
-#                 "source": {
-#                     "agent_id":
-#                         self.agent_id,
-#                 },
-#                 "camera": {
-#                     "camera_id":
-#                         camera_id,
-#                 },
-#                 "data":
-#                     tracked_data.model_dump(),
-#             }
-
-#             output_id = await self.publish(
-#                 self.output_stream,
-#                 tracked_event,
-#             )
-
-#             print(
-#                 f"TRACKED | "
-#                 f"Camera={camera_id} | "
-#                 f"Persons={len(tracks)} | "
-#                 f"Redis={output_id}"
-#             )
-
-#             await self.redis_client.xack(
-#                 self.input_stream,
-#                 self.group_name,
-#                 redis_id,
-#             )
-
-#         except asyncio.CancelledError:
-#             raise
-
-#         except Exception as error:
-
-#             print(
-#                 f"[{self.agent_id}] "
-#                 f"Message processing error "
-#                 f"for {redis_id}: {error}"
-#             )
-
-#             # IMPORTANT:
-#             # Do NOT ACK failed messages.
-#             #
-#             # Redis keeps them pending so they
-#             # can be recovered later.
-#             raise
-
-#     async def run(self):
-
-#         print(
-#             f"[{self.agent_id}] "
-#             f"Tracking loop started."
-#         )
-
-#         while self.running:
-
-#             try:
-
-#                 messages = await self.redis_client.xreadgroup(
-#                     groupname=self.group_name,
-#                     consumername=self.consumer_name,
-#                     streams={
-#                         self.input_stream: ">"
-#                     },
-#                     count=10,
-#                     block=5000,
-#                 )
-
-#                 if not messages:
-#                     continue
-
-#                 for stream_name, entries in messages:
-
-#                     for redis_id, fields in entries:
-
-#                         try:
-
-#                             await self.process_message(
-#                                 redis_id,
-#                                 fields,
-#                             )
-
-#                         except Exception as error:
-
-#                             print(
-#                                 f"[{self.agent_id}] "
-#                                 f"Failed message "
-#                                 f"{redis_id}: "
-#                                 f"{error}"
-#                             )
-
-#                             # Continue processing
-#                             # other messages.
-#                             #
-#                             # One bad event must
-#                             # NOT terminate tracker.
-
-#             except asyncio.CancelledError:
-#                 raise
-
-#             except Exception as error:
-
-#                 print(
-#                     f"[{self.agent_id}] "
-#                     f"Tracking loop error: "
-#                     f"{error}"
-#                 )
-
-#                 await asyncio.sleep(2)
-
-#         print(
-#             f"[{self.agent_id}] "
-#             f"Tracking loop stopped."
-#         )
-
-
-# async def main():
-#     agent = PersonTrackerAgent()
-
-#     await agent.run_forever()
-
-
-# if __name__ == "__main__":
-#     asyncio.run(main())
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 from __future__ import annotations
 
 import asyncio
@@ -1218,6 +48,7 @@ class PersonTrackerAgent(BaseAgent):
     """
 
     INPUT_STREAM = "events.detection"
+    HISTORICAL_INPUT_STREAM = "events.detection.historical"
     OUTPUT_STREAM = "events.tracking"
 
     INPUT_EVENT_TYPE = "person.detected"
@@ -1239,10 +70,42 @@ class PersonTrackerAgent(BaseAgent):
 
         self.input_stream = self.INPUT_STREAM
         self.output_stream = self.OUTPUT_STREAM
+        self.input_stream = os.getenv(
+            "TRACKER_INPUT_STREAM",
+            self.input_stream,
+        ).strip()
+
+        self.camera_id = os.getenv(
+            "CAMERA_ID",
+            "",
+        ).strip()
+
+        self.mode = os.getenv(
+            "TRACKER_MODE",
+            "live",
+        ).strip().lower()
+
+        if self.mode not in {
+            "live",
+            "historical",
+        }:
+            raise ValueError(
+                "TRACKER_MODE must be 'live' or 'historical'."
+            )
+
+        if self.mode == "historical":
+            self.input_stream = os.getenv(
+                "TRACKER_INPUT_STREAM",
+                self.HISTORICAL_INPUT_STREAM,
+            ).strip()
 
         self.group_name = os.getenv(
             "TRACKER_GROUP",
-            "tracker-workers",
+            (
+                "tracker-workers"
+                if self.mode == "live"
+                else "tracker-workers-historical"
+            ),
         ).strip()
 
         self.consumer_name = os.getenv(
@@ -1282,6 +145,52 @@ class PersonTrackerAgent(BaseAgent):
         if self.track_timeout <= 0:
             raise ValueError(
                 "TRACK_TIMEOUT must be greater than 0."
+            )
+
+        try:
+            self.live_event_max_age = float(
+                os.getenv(
+                    "LIVE_EVENT_MAX_AGE",
+                    "5",
+                )
+            )
+        except ValueError as error:
+            raise ValueError(
+                "LIVE_EVENT_MAX_AGE must be a valid number."
+            ) from error
+
+        if self.live_event_max_age <= 0:
+            raise ValueError(
+                "LIVE_EVENT_MAX_AGE must be greater than 0."
+            )
+
+        try:
+            self.pending_claim_idle_ms = int(
+                os.getenv(
+                    "TRACKER_PENDING_CLAIM_IDLE_MS",
+                    "30000",
+                )
+            )
+        except ValueError as error:
+            raise ValueError(
+                "TRACKER_PENDING_CLAIM_IDLE_MS must be a valid integer."
+            ) from error
+
+        if self.pending_claim_idle_ms < 0:
+            raise ValueError(
+                "TRACKER_PENDING_CLAIM_IDLE_MS cannot be negative."
+            )
+
+        self.dedupe_ttl_seconds = int(
+            os.getenv(
+                "TRACKER_DEDUPE_TTL_SECONDS",
+                "86400",
+            )
+        )
+
+        if self.dedupe_ttl_seconds <= 0:
+            raise ValueError(
+                "TRACKER_DEDUPE_TTL_SECONDS must be greater than 0."
             )
 
         # ---------------------------------------------------------
@@ -1334,7 +243,7 @@ class PersonTrackerAgent(BaseAgent):
             await self.redis_client.xgroup_create(
                 self.input_stream,
                 self.group_name,
-                id="0",
+                id="$" if self.mode == "live" else "0",
                 mkstream=True,
             )
 
@@ -1438,6 +347,22 @@ class PersonTrackerAgent(BaseAgent):
         return timestamp.astimezone(
             timezone.utc
         )
+
+    def _is_stale_live_event(
+        self,
+        event_timestamp: datetime,
+        now: datetime | None = None,
+    ) -> bool:
+        """Return whether a live event is too old to affect live state."""
+        if self.mode != "live":
+            return False
+
+        current_time = now or datetime.now(timezone.utc)
+        age = (
+            current_time - event_timestamp
+        ).total_seconds()
+
+        return age > self.live_event_max_age
 
     # =========================================================
     # Track cleanup
@@ -1697,25 +622,25 @@ class PersonTrackerAgent(BaseAgent):
                 {
                     "track_id": best_track_id,
                     "detection_id": detection_id,
-                    "class": detection.get(
-                        "class",
-                        "person",
-                    ),
-                    "class_id": detection.get(
-                        "class_id",
-                        0,
-                    ),
+                    # "class": detection.get(
+                    #     "class",
+                    #     "person",
+                    # ),
+                    # "class_id": detection.get(
+                    #     "class_id",
+                    #     0,
+                    # ),
                     "bbox": bbox,
                     "confidence": confidence,
                     "center": center,
-                    "match_distance": (
-                        None
-                        if best_distance == float("inf")
-                        else best_distance
-                    ),
-                    "age": camera_tracks[
-                        best_track_id
-                    ]["age"],
+                    # "match_distance": (
+                    #     None
+                    #     if best_distance == float("inf")
+                    #     else best_distance
+                    # ),
+                    # "age": camera_tracks[
+                    #     best_track_id
+                    # ]["age"],
                 }
             )
 
@@ -1788,6 +713,45 @@ class PersonTrackerAgent(BaseAgent):
     # =========================================================
     # Message processing
     # =========================================================
+
+    def _dedupe_key(self, source_event_id: str) -> str:
+        return (
+            f"tracker:processed:{self.mode}:"
+            f"{source_event_id}"
+        )
+
+    async def _claim_event_for_processing(
+        self,
+        source_event_id: str,
+    ) -> bool:
+        """Claim a source event, returning false for completed replays."""
+        if not self.redis_client:
+            raise RuntimeError(
+                "Redis client is not initialized."
+            )
+
+        key = self._dedupe_key(source_event_id)
+        state = await self.redis_client.get(key)
+
+        if state != "done":
+            return True
+
+        if state == "done":
+            return False
+
+        return False
+
+    async def _mark_event_done(self, source_event_id: str) -> None:
+        if not self.redis_client:
+            raise RuntimeError(
+                "Redis client is not initialized."
+            )
+
+        await self.redis_client.set(
+            self._dedupe_key(source_event_id),
+            "done",
+            ex=self.dedupe_ttl_seconds,
+        )
 
     async def process_message(
         self,
@@ -1862,9 +826,38 @@ class PersonTrackerAgent(BaseAgent):
                     "Input event is missing data."
                 )
 
+            source_event_id = event.get(
+                "event_id"
+            )
+
+            if not source_event_id:
+                raise ValueError(
+                    "Input event is missing event_id."
+                )
+
+            if not await self._claim_event_for_processing(
+                source_event_id,
+            ):
+                await self.redis_client.xack(
+                    self.input_stream,
+                    self.group_name,
+                    redis_id,
+                )
+                print(
+                    f"[{self.agent_id}] Ignoring duplicate event "
+                    f"{source_event_id}."
+                )
+                return
+
             camera_id = self._require_camera_id(
                 event
             )
+
+            if self.camera_id and camera_id != self.camera_id:
+                raise ValueError(
+                    "Event camera does not match tracker camera: "
+                    f"{camera_id} != {self.camera_id}"
+                )
 
             # -------------------------------------------------
             # Preserve event time
@@ -1878,6 +871,23 @@ class PersonTrackerAgent(BaseAgent):
                 raise ValueError(
                     "Input event contains an invalid timestamp."
                 )
+
+            if self._is_stale_live_event(event_timestamp):
+                print(
+                    f"[{self.agent_id}] "
+                    f"Discarding stale live event {redis_id} "
+                    f"({event_timestamp.isoformat()})."
+                )
+
+                await self._mark_event_done(source_event_id)
+
+                await self.redis_client.xack(
+                    self.input_stream,
+                    self.group_name,
+                    redis_id,
+                )
+
+                return
 
             # -------------------------------------------------
             # Extract detections
@@ -1910,15 +920,6 @@ class PersonTrackerAgent(BaseAgent):
             # Preserve lineage
             # -------------------------------------------------
 
-            source_event_id = event.get(
-                "event_id"
-            )
-
-            if not source_event_id:
-                raise ValueError(
-                    "Input event is missing event_id."
-                )
-
             trace_id = context.get(
                 "trace_id"
             )
@@ -1931,18 +932,26 @@ class PersonTrackerAgent(BaseAgent):
                 "incident_id"
             )
 
-            mode = context.get(
+            input_mode = context.get(
                 "mode",
-                "live",
+                self.mode,
             )
 
-            if mode not in {
+            if input_mode not in {
                 "live",
                 "historical",
             }:
                 raise ValueError(
-                    f"Unsupported event mode: {mode}"
+                    f"Unsupported event mode: {input_mode}"
                 )
+
+            if input_mode != self.mode:
+                raise ValueError(
+                    "Input event mode does not match tracker mode: "
+                    f"{input_mode} != {self.mode}"
+                )
+
+            mode = self.mode
 
             # -------------------------------------------------
             # Build canonical tracking event
@@ -1954,36 +963,37 @@ class PersonTrackerAgent(BaseAgent):
                 instance_id=self.instance_id,
                 hostname=self.hostname,
                 camera_id=camera_id,
+                event_id=source_event_id,
                 mode=mode,
                 timestamp=event_timestamp,
                 trace_id=trace_id,
                 correlation_id=correlation_id,
                 incident_id=incident_id,
                 data={
-                    "source_event_id": source_event_id,
-                    "source_redis_id": redis_id,
+                    # "source_event_id": source_event_id,
+                    # "source_redis_id": redis_id,
                     "frame_id": data.get(
                         "frame_id"
                     ),
-                    "frame_timestamp": data.get(
-                        "frame_timestamp"
-                    ),
-                    "detection_count": len(
-                        detections
-                    ),
-                    "track_count": len(
-                        tracks
-                    ),
+                    # "frame_timestamp": data.get(
+                    #     "frame_timestamp"
+                    # ),
+                    # "detection_count": len(
+                    #     detections
+                    # ),
+                    # "track_count": len(
+                    #     tracks
+                    # ),
                     "tracks": tracks,
-                    "tracker": {
-                        "type": "center-distance",
-                        "distance_threshold": (
-                            self.distance_threshold
-                        ),
-                        "track_timeout": (
-                            self.track_timeout
-                        ),
-                    },
+                    # "tracker": {
+                    #     "type": "center-distance",
+                    #     "distance_threshold": (
+                    #         self.distance_threshold
+                    #     ),
+                    #     "track_timeout": (
+                    #         self.track_timeout
+                    #     ),
+                    # },
                 },
             )
 
@@ -1995,6 +1005,8 @@ class PersonTrackerAgent(BaseAgent):
                 self.output_stream,
                 tracked_event,
             )
+
+            await self._mark_event_done(source_event_id)
 
             print(
                 f"TRACKED | "
@@ -2041,6 +1053,62 @@ class PersonTrackerAgent(BaseAgent):
     # Main consumer loop
     # =========================================================
 
+    async def recover_pending_messages(self) -> None:
+        """Reclaim and process idle messages from failed consumers."""
+        if not self.redis_client:
+            raise RuntimeError(
+                "Redis client is not initialized."
+            )
+
+        cursor = "0-0"
+        recovered = 0
+
+        while self.running:
+            try:
+                result = await self.redis_client.xautoclaim(
+                    self.input_stream,
+                    self.group_name,
+                    self.consumer_name,
+                    min_idle_time=self.pending_claim_idle_ms,
+                    start_id=cursor,
+                    count=10,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                print(
+                    f"[{self.agent_id}] Pending recovery error: "
+                    f"{type(error).__name__}: {error}"
+                )
+                return
+
+            if not result or len(result) < 2:
+                return
+
+            next_cursor, entries = result[0], result[1]
+
+            for redis_id, fields in entries:
+                try:
+                    await self.process_message(redis_id, fields)
+                    recovered += 1
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:
+                    print(
+                        f"[{self.agent_id}] Recovered message failed "
+                        f"{redis_id}: {type(error).__name__}: {error}"
+                    )
+
+            if next_cursor in ("0-0", b"0-0"):
+                break
+            cursor = next_cursor
+
+        if recovered:
+            print(
+                f"[{self.agent_id}] Recovered "
+                f"{recovered} pending message(s)."
+            )
+
     async def run(self):
         if not self.redis_client:
             raise RuntimeError(
@@ -2054,6 +1122,8 @@ class PersonTrackerAgent(BaseAgent):
 
         while self.running:
             try:
+                await self.recover_pending_messages()
+
                 messages = (
                     await self.redis_client.xreadgroup(
                         groupname=self.group_name,

@@ -1,6 +1,7 @@
 import Stats from '../../components/Stats/Stats'
 import LiveCamera from '../../components/Camera/LiveCamera'
 import IncidentPanel from '../../components/Incidents/IncidentPanel'
+import CameraRuntime from '../../components/CameraRuntime/CameraRuntime'
 
 import useIncidents from '../../hooks/useIncidents'
 
@@ -20,6 +21,8 @@ function Dashboard() {
       <Stats incidents={incidents} />
 
       <LiveCamera />
+
+      <CameraRuntime />
 
       <IncidentPanel
         incidents={incidents}

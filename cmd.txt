@@ -16,12 +16,24 @@ npm run dev
 
 # 3. Camera Detection Agent
 # Run from project root in a new terminal:
+#$env:CAMERA_ID="CAM01"
+#$env:CAMERA_NAME="Laptop Camera"
+#$env:CAMERA_LOCATION="Test Desk"
+#$env:CAMERA_SOURCE="0"
+#$env:SHOW_CAMERA="true"
+#python -m agents.detection.main
+
+#3.this is Camera Detection Agent
+$env:REDIS_HOST="localhost"
+$env:REDIS_PORT="6380"
+$env:AGENT_ID="person-detector-CAM01"
 $env:CAMERA_ID="CAM01"
-$env:CAMERA_NAME="Laptop Camera"
-$env:CAMERA_LOCATION="Test Desk"
+$env:CAMERA_NAME="Laptop Camera 01"
+$env:CAMERA_LOCATION="Test Desk 01"
 $env:CAMERA_SOURCE="0"
 $env:SHOW_CAMERA="true"
-python -m agents.detection.main
+
+.\.venv\Scripts\python.exe -m agents.detection.main
 
 
 # 4. Messaging Consumer

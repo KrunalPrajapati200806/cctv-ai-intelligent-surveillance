@@ -1,7 +1,9 @@
+name: cctv_redis_2
+
 services:
   redis:
     image: redis:7-alpine
-    container_name: cctv-redis
+    container_name: cctv_redis_2
     ports:
-      - "6379:6379"
+      - "6380:6379"
     restart: unless-stopped

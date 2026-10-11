@@ -1,2160 +1,73 @@
-# # # # # import asyncio
-# # # # # import json
-
-# # # # # import redis.asyncio as redis
-
-# # # # # from app.messaging.redis_client import redis_client
-# # # # # from app.monitoring.agent_registry import AgentRegistry
-
-
-# # # # # STREAM_NAME = "events.system"
-# # # # # GROUP_NAME = "heartbeat-workers"
-# # # # # CONSUMER_NAME = "heartbeat-consumer-01"
-
-# # # # # registry = AgentRegistry()
-
-
-# # # # # async def ensure_consumer_group():
-# # # # #     try:
-# # # # #         await redis_client.xgroup_create(
-# # # # #             STREAM_NAME,
-# # # # #             GROUP_NAME,
-# # # # #             id="0",
-# # # # #             mkstream=True,
-# # # # #         )
-
-# # # # #         print(
-# # # # #             f"Created consumer group: {GROUP_NAME}"
-# # # # #         )
-
-# # # # #     except redis.ResponseError as error:
-# # # # #         if "BUSYGROUP" in str(error):
-# # # # #             print(
-# # # # #                 f"Consumer group already exists: {GROUP_NAME}"
-# # # # #             )
-# # # # #         else:
-# # # # #             raise
-
-
-# # # # # async def consume_heartbeats():
-# # # # #     await ensure_consumer_group()
-
-# # # # #     print(
-# # # # #         f"Heartbeat consumer started: {CONSUMER_NAME}"
-# # # # #     )
-
-# # # # #     while True:
-# # # # #         try:
-# # # # #             messages = await redis_client.xreadgroup(
-# # # # #                 groupname=GROUP_NAME,
-# # # # #                 consumername=CONSUMER_NAME,
-# # # # #                 streams={
-# # # # #                     STREAM_NAME: ">"
-# # # # #                 },
-# # # # #                 count=10,
-# # # # #                 block=5000,
-# # # # #             )
-
-# # # # #             if not messages:
-# # # # #                 continue
-
-# # # # #             for stream_name, stream_messages in messages:
-# # # # #                 for message_id, fields in stream_messages:
-
-# # # # #                     try:
-# # # # #                         event_type = fields.get(
-# # # # #                             "event_type"
-# # # # #                         )
-
-# # # # #                         if event_type != "agent.heartbeat":
-# # # # #                             await redis_client.xack(
-# # # # #                                 STREAM_NAME,
-# # # # #                                 GROUP_NAME,
-# # # # #                                 message_id,
-# # # # #                             )
-# # # # #                             continue
-
-# # # # #                         agent_id = fields.get(
-# # # # #                             "source_agent_id"
-# # # # #                         )
-
-# # # # #                         if not agent_id:
-# # # # #                             print(
-# # # # #                                 f"Invalid heartbeat: "
-# # # # #                                 f"{message_id}"
-# # # # #                             )
-
-# # # # #                             await redis_client.xack(
-# # # # #                                 STREAM_NAME,
-# # # # #                                 GROUP_NAME,
-# # # # #                                 message_id,
-# # # # #                             )
-# # # # #                             continue
-
-# # # # #                         registry.update_heartbeat(
-# # # # #                             agent_id
-# # # # #                         )
-
-# # # # #                         print(
-# # # # #                             f"Heartbeat received: "
-# # # # #                             f"{agent_id}"
-# # # # #                         )
-
-# # # # #                         await redis_client.xack(
-# # # # #                             STREAM_NAME,
-# # # # #                             GROUP_NAME,
-# # # # #                             message_id,
-# # # # #                         )
-
-# # # # #                     except Exception as error:
-# # # # #                         print(
-# # # # #                             f"Heartbeat processing error "
-# # # # #                             f"for {message_id}: {error}"
-# # # # #                         )
-
-# # # # #         except asyncio.CancelledError:
-# # # # #             print(
-# # # # #                 "Heartbeat consumer stopped."
-# # # # #             )
-# # # # #             raise
-
-# # # # #         except Exception as error:
-# # # # #             print(
-# # # # #                 f"Heartbeat consumer error: {error}"
-# # # # #             )
-
-# # # # #             await asyncio.sleep(2)
-
-
-# # # # # async def main():
-# # # # #     try:
-# # # # #         await consume_heartbeats()
-
-# # # # #     finally:
-# # # # #         await redis_client.aclose()
-
-
-# # # # # if __name__ == "__main__":
-# # # # #     asyncio.run(main())
-
-
-
-
-
-
-
-
-
-
-
-# # # # import asyncio
-# # # # import json
-# # # # import os
-
-# # # # import redis.asyncio as redis
-
-# # # # from backend.app.monitoring.agent_registry import agent_registry
-
-
-# # # # REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
-# # # # REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
-
-# # # # STREAM_NAME = "events.system"
-# # # # GROUP_NAME = "heartbeat-workers"
-# # # # CONSUMER_NAME = os.getenv(
-# # # #     "HEARTBEAT_CONSUMER_NAME",
-# # # #     "heartbeat-consumer-01",
-# # # # )
-
-# # # # READ_COUNT = 10
-# # # # BLOCK_MS = 5000
-# # # # RETRY_DELAY = 2
-
-
-# # # # def decode(value):
-# # # #     if isinstance(value, bytes):
-# # # #         return value.decode("utf-8")
-# # # #     return value
-
-
-# # # # def normalize_fields(fields):
-# # # #     return {
-# # # #         decode(key): decode(value)
-# # # #         for key, value in fields.items()
-# # # #     }
-
-
-# # # # def parse_heartbeat(fields):
-# # # #     """
-# # # #     Supports both:
-# # # #         direct Redis heartbeat fields
-# # # #     and:
-# # # #         {"event": "<JSON heartbeat>"}
-# # # #     """
-
-# # # #     fields = normalize_fields(fields)
-
-# # # #     event = fields.get("event")
-
-# # # #     if event:
-# # # #         if isinstance(event, str):
-# # # #             try:
-# # # #                 event = json.loads(event)
-# # # #             except json.JSONDecodeError:
-# # # #                 return None
-
-# # # #         if isinstance(event, dict):
-# # # #             fields = {
-# # # #                 **fields,
-# # # #                 **event,
-# # # #             }
-
-# # # #     if fields.get("event_type") != "agent.heartbeat":
-# # # #         return None
-
-# # # #     agent_id = fields.get("source_agent_id")
-
-# # # #     if not agent_id:
-# # # #         return None
-
-# # # #     return {
-# # # #         "agent_id": agent_id,
-# # # #         "status": fields.get("status", "alive"),
-# # # #         "event_id": fields.get("event_id"),
-# # # #         "timestamp": fields.get("timestamp"),
-# # # #     }
-
-
-# # # # async def ensure_consumer_group(redis_client):
-# # # #     try:
-# # # #         await redis_client.xgroup_create(
-# # # #             STREAM_NAME,
-# # # #             GROUP_NAME,
-# # # #             id="0-0",
-# # # #             mkstream=True,
-# # # #         )
-# # # #         print(
-# # # #             f"Created Redis consumer group "
-# # # #             f"{GROUP_NAME} on {STREAM_NAME}"
-# # # #         )
-
-# # # #     except redis.ResponseError as error:
-# # # #         if "BUSYGROUP" not in str(error):
-# # # #             raise
-
-
-# # # # async def acknowledge(redis_client, message_id):
-# # # #     await redis_client.xack(
-# # # #         STREAM_NAME,
-# # # #         GROUP_NAME,
-# # # #         message_id,
-# # # #     )
-
-
-# # # # async def process_message(redis_client, message_id, fields):
-# # # #     try:
-# # # #         heartbeat = parse_heartbeat(fields)
-
-# # # #         if heartbeat is None:
-# # # #             await acknowledge(redis_client, message_id)
-# # # #             return
-
-# # # #         agent_id = heartbeat["agent_id"]
-
-# # # #         # IMPORTANT:
-# # # #         # Use the shared global registry.
-# # # #         agent_registry.update_heartbeat(agent_id)
-
-# # # #         print(
-# # # #             f"[HEARTBEAT] {agent_id} -> ALIVE"
-# # # #         )
-
-# # # #         # ACK only after successful registry update.
-# # # #         await acknowledge(redis_client, message_id)
-
-# # # #     except Exception as error:
-# # # #         print(
-# # # #             f"[HEARTBEAT ERROR] "
-# # # #             f"message={message_id} error={error}"
-# # # #         )
-
-# # # #         # Do NOT ACK failed processing.
-# # # #         # Redis keeps the message pending.
-
-
-# # # # async def heartbeat_consumer_loop(redis_client):
-# # # #     await ensure_consumer_group(redis_client)
-
-# # # #     print(
-# # # #         f"Heartbeat consumer started: "
-# # # #         f"{STREAM_NAME}/{GROUP_NAME}"
-# # # #     )
-
-# # # #     while True:
-# # # #         try:
-# # # #             messages = await redis_client.xreadgroup(
-# # # #                 groupname=GROUP_NAME,
-# # # #                 consumername=CONSUMER_NAME,
-# # # #                 streams={
-# # # #                     STREAM_NAME: ">"
-# # # #                 },
-# # # #                 count=READ_COUNT,
-# # # #                 block=BLOCK_MS,
-# # # #             )
-
-# # # #             if not messages:
-# # # #                 continue
-
-# # # #             for _, stream_messages in messages:
-# # # #                 for message_id, fields in stream_messages:
-# # # #                     await process_message(
-# # # #                         redis_client,
-# # # #                         message_id,
-# # # #                         fields,
-# # # #                     )
-
-# # # #         except asyncio.CancelledError:
-# # # #             raise
-
-# # # #         except Exception as error:
-# # # #             print(
-# # # #                 f"[HEARTBEAT CONSUMER ERROR] {error}"
-# # # #             )
-# # # #             await asyncio.sleep(RETRY_DELAY)
-
-
-# # # # async def main():
-# # # #     redis_client = redis.Redis(
-# # # #         host=REDIS_HOST,
-# # # #         port=REDIS_PORT,
-# # # #         decode_responses=True,
-# # # #         socket_timeout=None,
-# # # #         health_check_interval=30,
-# # # #     )
-
-# # # #     try:
-# # # #         await heartbeat_consumer_loop(redis_client)
-
-# # # #     finally:
-# # # #         await redis_client.aclose()
-
-
-# # # # if __name__ == "__main__":
-# # # #     asyncio.run(main())
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# # # import asyncio
-# # # import json
-# # # import os
-
-# # # import redis.asyncio as redis
-
-# # # from backend.app.monitoring.agent_registry import agent_registry
-
-
-# # # REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
-# # # REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
-
-# # # STREAM_NAME = "events.system"
-# # # GROUP_NAME = "heartbeat-workers"
-
-# # # CONSUMER_NAME = os.getenv(
-# # #     "HEARTBEAT_CONSUMER_NAME",
-# # #     "heartbeat-consumer-01",
-# # # )
-
-# # # READ_COUNT = 10
-# # # BLOCK_MS = 5000
-# # # RETRY_DELAY = 2
-
-
-# # # def decode(value):
-# # #     if isinstance(value, bytes):
-# # #         return value.decode("utf-8")
-
-# # #     return value
-
-
-# # # def normalize_fields(fields):
-# # #     return {
-# # #         decode(key): decode(value)
-# # #         for key, value in fields.items()
-# # #     }
-
-
-# # # def parse_heartbeat(fields):
-# # #     """
-# # #     Parse both:
-
-# # #     1. Current BaseAgent heartbeat format:
-# # #        {"event": "<JSON>"}
-
-# # #     2. Direct Redis fields.
-# # #     """
-
-# # #     fields = normalize_fields(fields)
-
-# # #     event = fields.get("event")
-
-# # #     if event:
-# # #         if isinstance(event, str):
-# # #             try:
-# # #                 event = json.loads(event)
-# # #             except json.JSONDecodeError:
-# # #                 return None
-
-# # #         if isinstance(event, dict):
-# # #             merged = {
-# # #                 **fields,
-# # #                 **event,
-# # #             }
-# # #             fields = merged
-
-# # #     if fields.get("event_type") != "agent.heartbeat":
-# # #         return None
-
-# # #     agent_id = (
-# # #         fields.get("source_agent_id")
-# # #         or fields.get("agent_id")
-# # #     )
-
-# # #     if not agent_id:
-# # #         source = fields.get("source")
-
-# # #         if isinstance(source, str):
-# # #             try:
-# # #                 source = json.loads(source)
-# # #             except json.JSONDecodeError:
-# # #                 source = None
-
-# # #         if isinstance(source, dict):
-# # #             agent_id = source.get("agent_id")
-
-# # #     if not agent_id:
-# # #         return None
-
-# # #     return {
-# # #         "agent_id": agent_id,
-# # #         "status": fields.get(
-# # #             "status",
-# # #             "alive",
-# # #         ),
-# # #         "event_id": fields.get(
-# # #             "event_id"
-# # #         ),
-# # #         "timestamp": fields.get(
-# # #             "timestamp"
-# # #         ),
-# # #         "instance_id": fields.get(
-# # #             "instance_id"
-# # #         ),
-# # #         "hostname": fields.get(
-# # #             "hostname"
-# # #         ),
-# # #     }
-
-
-# # # async def ensure_consumer_group(redis_client):
-# # #     try:
-# # #         await redis_client.xgroup_create(
-# # #             STREAM_NAME,
-# # #             GROUP_NAME,
-# # #             id="0-0",
-# # #             mkstream=True,
-# # #         )
-
-# # #         print(
-# # #             f"[HEARTBEAT] Created consumer group "
-# # #             f"{GROUP_NAME}"
-# # #         )
-
-# # #     except redis.ResponseError as error:
-# # #         if "BUSYGROUP" not in str(error):
-# # #             raise
-
-
-# # # async def acknowledge(
-# # #     redis_client,
-# # #     message_id,
-# # # ):
-# # #     await redis_client.xack(
-# # #         STREAM_NAME,
-# # #         GROUP_NAME,
-# # #         message_id,
-# # #     )
-
-
-# # # async def process_message(
-# # #     redis_client,
-# # #     message_id,
-# # #     fields,
-# # # ):
-# # #     try:
-# # #         heartbeat = parse_heartbeat(fields)
-
-# # #         if heartbeat is None:
-# # #             await acknowledge(
-# # #                 redis_client,
-# # #                 message_id,
-# # #             )
-# # #             return
-
-# # #         agent_id = heartbeat["agent_id"]
-
-# # #         agent_registry.update_heartbeat(
-# # #             agent_id=agent_id,
-# # #             instance_id=heartbeat.get(
-# # #                 "instance_id"
-# # #             ),
-# # #             hostname=heartbeat.get(
-# # #                 "hostname"
-# # #             ),
-# # #         )
-
-# # #         print(
-# # #             f"[HEARTBEAT] {agent_id} -> ALIVE"
-# # #         )
-
-# # #         # ACK only after successful
-# # #         # registry update.
-# # #         await acknowledge(
-# # #             redis_client,
-# # #             message_id,
-# # #         )
-
-# # #     except Exception as error:
-# # #         print(
-# # #             f"[HEARTBEAT ERROR] "
-# # #             f"message={message_id} "
-# # #             f"error={error}"
-# # #         )
-
-# # #         # Do NOT ACK.
-# # #         # Redis keeps the message pending.
-
-
-# # # async def heartbeat_consumer_loop(
-# # #     redis_client,
-# # # ):
-# # #     await ensure_consumer_group(
-# # #         redis_client
-# # #     )
-
-# # #     print(
-# # #         f"[HEARTBEAT] Consumer started: "
-# # #         f"{STREAM_NAME}/{GROUP_NAME}"
-# # #     )
-
-# # #     while True:
-# # #         try:
-# # #             messages = await redis_client.xreadgroup(
-# # #                 groupname=GROUP_NAME,
-# # #                 consumername=CONSUMER_NAME,
-# # #                 streams={
-# # #                     STREAM_NAME: ">"
-# # #                 },
-# # #                 count=READ_COUNT,
-# # #                 block=BLOCK_MS,
-# # #             )
-
-# # #             if not messages:
-# # #                 continue
-
-# # #             for _, stream_messages in messages:
-
-# # #                 for message_id, fields in stream_messages:
-
-# # #                     try:
-# # #                         await process_message(
-# # #                             redis_client,
-# # #                             message_id,
-# # #                             fields,
-# # #                         )
-
-# # #                     except Exception as error:
-# # #                         print(
-# # #                             "[HEARTBEAT MESSAGE "
-# # #                             f"ISOLATION ERROR] "
-# # #                             f"{message_id}: {error}"
-# # #                         )
-
-# # #         except asyncio.CancelledError:
-# # #             raise
-
-# # #         except Exception as error:
-# # #             print(
-# # #                 f"[HEARTBEAT CONSUMER ERROR] "
-# # #                 f"{error}"
-# # #             )
-
-# # #             await asyncio.sleep(
-# # #                 RETRY_DELAY
-# # #             )
-
-
-# # # async def main():
-# # #     redis_client = redis.Redis(
-# # #         host=REDIS_HOST,
-# # #         port=REDIS_PORT,
-# # #         decode_responses=True,
-# # #         socket_timeout=None,
-# # #         health_check_interval=30,
-# # #     )
-
-# # #     try:
-# # #         await heartbeat_consumer_loop(
-# # #             redis_client
-# # #         )
-
-# # #     finally:
-# # #         await redis_client.aclose()
-
-
-# # # if __name__ == "__main__":
-# # #     asyncio.run(main())
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# # import asyncio
-# # import json
-# # import os
-
-# # import redis.asyncio as redis
-
-# # from backend.app.monitoring.agent_registry import agent_registry
-
-
-# # # ============================================================
-# # # REDIS CONFIGURATION
-# # # ============================================================
-
-# # REDIS_HOST = os.getenv(
-# #     "REDIS_HOST",
-# #     "localhost",
-# # )
-
-# # REDIS_PORT = int(
-# #     os.getenv(
-# #         "REDIS_PORT",
-# #         "6379",
-# #     )
-# # )
-
-
-# # # ============================================================
-# # # STREAM CONFIGURATION
-# # # ============================================================
-
-# # STREAM_NAME = "events.system"
-
-# # GROUP_NAME = "heartbeat-workers"
-
-# # CONSUMER_NAME = os.getenv(
-# #     "HEARTBEAT_CONSUMER_NAME",
-# #     "heartbeat-consumer-01",
-# # )
-
-
-# # # ============================================================
-# # # CONSUMER CONFIGURATION
-# # # ============================================================
-
-# # READ_COUNT = int(
-# #     os.getenv(
-# #         "HEARTBEAT_READ_COUNT",
-# #         "10",
-# #     )
-# # )
-
-# # BLOCK_MS = int(
-# #     os.getenv(
-# #         "HEARTBEAT_BLOCK_MS",
-# #         "5000",
-# #     )
-# # )
-
-# # RETRY_DELAY = float(
-# #     os.getenv(
-# #         "HEARTBEAT_RETRY_DELAY",
-# #         "2",
-# #     )
-# # )
-
-
-# # # ============================================================
-# # # PENDING MESSAGE RECOVERY
-# # # ============================================================
-
-# # # A pending message older than this amount can be reclaimed.
-# # #
-# # # 30 seconds is appropriate for this heartbeat system because
-# # # heartbeat timeout is currently 30 seconds.
-# # #
-# # # We deliberately use a slightly smaller value so a crashed
-# # # consumer can recover pending messages promptly.
-# # PENDING_IDLE_MS = int(
-# #     os.getenv(
-# #         "HEARTBEAT_PENDING_IDLE_MS",
-# #         "15000",
-# #     )
-# # )
-
-
-# # # ============================================================
-# # # DECODING HELPERS
-# # # ============================================================
-
-# # def decode(value):
-# #     """
-# #     Convert Redis bytes into UTF-8 strings.
-
-# #     Redis may return bytes when decode_responses=False.
-# #     This helper keeps parsing compatible with either mode.
-# #     """
-
-# #     if isinstance(value, bytes):
-# #         return value.decode(
-# #             "utf-8",
-# #             errors="replace",
-# #         )
-
-# #     return value
-
-
-# # def normalize_fields(fields):
-# #     """
-# #     Normalize Redis hash fields into string keys/values.
-# #     """
-
-# #     return {
-# #         decode(key): decode(value)
-# #         for key, value in fields.items()
-# #     }
-
-
-# # # ============================================================
-# # # HEARTBEAT PARSING
-# # # ============================================================
-
-# # def parse_heartbeat(fields):
-# #     """
-# #     Parse both supported heartbeat formats.
-
-# #     Format 1:
-# #         {
-# #             "event": "<JSON>"
-# #         }
-
-# #     Format 2:
-# #         Direct Redis fields.
-
-# #     Returns:
-# #         normalized heartbeat dictionary
-# #         or None when the message is not a valid heartbeat.
-# #     """
-
-# #     fields = normalize_fields(fields)
-
-# #     # --------------------------------------------------------
-# #     # BaseAgent currently publishes:
-# #     #
-# #     # {"event": "<JSON encoded event>"}
-# #     # --------------------------------------------------------
-
-# #     event = fields.get(
-# #         "event"
-# #     )
-
-# #     if event:
-# #         if isinstance(event, str):
-# #             try:
-# #                 event = json.loads(event)
-
-# #             except json.JSONDecodeError:
-# #                 return None
-
-# #         if isinstance(event, dict):
-# #             merged = {
-# #                 **fields,
-# #                 **event,
-# #             }
-
-# #             fields = merged
-
-# #     # --------------------------------------------------------
-# #     # Verify event type.
-# #     # --------------------------------------------------------
-
-# #     if fields.get(
-# #         "event_type"
-# #     ) != "agent.heartbeat":
-# #         return None
-
-# #     # --------------------------------------------------------
-# #     # Find agent ID.
-# #     # --------------------------------------------------------
-
-# #     agent_id = (
-# #         fields.get(
-# #             "source_agent_id"
-# #         )
-# #         or fields.get(
-# #             "agent_id"
-# #         )
-# #     )
-
-# #     # --------------------------------------------------------
-# #     # Support nested source object.
-# #     # --------------------------------------------------------
-
-# #     if not agent_id:
-
-# #         source = fields.get(
-# #             "source"
-# #         )
-
-# #         if isinstance(source, str):
-
-# #             try:
-# #                 source = json.loads(
-# #                     source
-# #                 )
-
-# #             except json.JSONDecodeError:
-# #                 source = None
-
-# #         if isinstance(source, dict):
-# #             agent_id = source.get(
-# #                 "agent_id"
-# #             )
-
-# #     if not agent_id:
-# #         return None
-
-# #     return {
-# #         "agent_id": agent_id,
-
-# #         "status": fields.get(
-# #             "status",
-# #             "alive",
-# #         ),
-
-# #         "event_id": fields.get(
-# #             "event_id"
-# #         ),
-
-# #         "timestamp": fields.get(
-# #             "timestamp"
-# #         ),
-
-# #         "instance_id": fields.get(
-# #             "instance_id"
-# #         ),
-
-# #         "hostname": fields.get(
-# #             "hostname"
-# #         ),
-# #     }
-
-
-# # # ============================================================
-# # # CONSUMER GROUP
-# # # ============================================================
-
-# # async def ensure_consumer_group(
-# #     redis_client,
-# # ):
-# #     """
-# #     Ensure the heartbeat consumer group exists.
-# #     """
-
-# #     try:
-
-# #         await redis_client.xgroup_create(
-# #             STREAM_NAME,
-# #             GROUP_NAME,
-# #             id="0-0",
-# #             mkstream=True,
-# #         )
-
-# #         print(
-# #             f"[HEARTBEAT] Created consumer group "
-# #             f"{GROUP_NAME}"
-# #         )
-
-# #     except redis.ResponseError as error:
-
-# #         if "BUSYGROUP" not in str(error):
-# #             raise
-
-
-# # # ============================================================
-# # # ACKNOWLEDGEMENT
-# # # ============================================================
-
-# # async def acknowledge(
-# #     redis_client,
-# #     message_id,
-# # ):
-# #     """
-# #     ACK a successfully processed message.
-# #     """
-
-# #     await redis_client.xack(
-# #         STREAM_NAME,
-# #         GROUP_NAME,
-# #         message_id,
-# #     )
-
-
-# # # ============================================================
-# # # MESSAGE PROCESSING
-# # # ============================================================
-
-# # async def process_message(
-# #     redis_client,
-# #     message_id,
-# #     fields,
-# # ):
-# #     """
-# #     Process exactly one heartbeat message.
-
-# #     Failure of one message must NOT terminate the consumer.
-# #     """
-
-# #     try:
-
-# #         heartbeat = parse_heartbeat(
-# #             fields
-# #         )
-
-# #         # ----------------------------------------------------
-# #         # Ignore irrelevant/malformed messages.
-# #         #
-# #         # They are ACKed so they do not permanently occupy
-# #         # the pending queue.
-# #         # ----------------------------------------------------
-
-# #         if heartbeat is None:
-
-# #             await acknowledge(
-# #                 redis_client,
-# #                 message_id,
-# #             )
-
-# #             return
-
-# #         agent_id = heartbeat[
-# #             "agent_id"
-# #         ]
-
-# #         # ----------------------------------------------------
-# #         # Update in-memory registry.
-# #         # ----------------------------------------------------
-
-# #         agent_registry.update_heartbeat(
-# #             agent_id=agent_id,
-# #             instance_id=heartbeat.get(
-# #                 "instance_id"
-# #             ),
-# #             hostname=heartbeat.get(
-# #                 "hostname"
-# #             ),
-# #         )
-
-# #         print(
-# #             f"[HEARTBEAT] "
-# #             f"{agent_id} -> ALIVE"
-# #         )
-
-# #         # ----------------------------------------------------
-# #         # ACK ONLY after successful registry update.
-# #         # ----------------------------------------------------
-
-# #         await acknowledge(
-# #             redis_client,
-# #             message_id,
-# #         )
-
-# #     except Exception as error:
-
-# #         print(
-# #             f"[HEARTBEAT ERROR] "
-# #             f"message={message_id} "
-# #             f"error={error}"
-# #         )
-
-# #         # ----------------------------------------------------
-# #         # IMPORTANT:
-# #         #
-# #         # Do NOT ACK failed messages.
-# #         #
-# #         # Redis keeps them pending so they can be recovered.
-# #         # ----------------------------------------------------
-
-
-# # # ============================================================
-# # # PENDING MESSAGE RECOVERY
-# # # ============================================================
-
-# # async def recover_pending_messages(
-# #     redis_client,
-# # ):
-# #     """
-# #     Recover stale pending messages belonging to crashed or
-# #     disconnected heartbeat consumers.
-
-# #     This closes the reliability gap where a message was
-# #     delivered to an old consumer but never ACKed.
-
-# #     XAUTOCLAIM transfers ownership of stale pending messages
-# #     to the current consumer.
-# #     """
-
-# #     print(
-# #         "[HEARTBEAT] "
-# #         f"Checking pending messages "
-# #         f"(idle >= {PENDING_IDLE_MS}ms)"
-# #     )
-
-# #     start_id = "0-0"
-
-# #     recovered_total = 0
-
-# #     while True:
-
-# #         try:
-
-# #             result = await redis_client.xautoclaim(
-# #                 STREAM_NAME,
-# #                 GROUP_NAME,
-# #                 CONSUMER_NAME,
-# #                 PENDING_IDLE_MS,
-# #                 start_id,
-# #                 count=READ_COUNT,
-# #             )
-
-# #         except redis.ResponseError as error:
-
-# #             print(
-# #                 "[HEARTBEAT] "
-# #                 f"Pending recovery error: {error}"
-# #             )
-
-# #             return
-
-# #         # redis-py returns:
-# #         #
-# #         # [
-# #         #     next_start_id,
-# #         #     messages,
-# #         #     deleted_ids
-# #         # ]
-# #         #
-# #         # Some Redis/client versions may return slightly
-# #         # different structures, so handle defensively.
-
-# #         if not result:
-# #             return
-
-# #         next_start_id = result[0]
-
-# #         messages = result[1]
-
-# #         if messages:
-
-# #             print(
-# #                 f"[HEARTBEAT] "
-# #                 f"Recovering {len(messages)} "
-# #                 f"pending message(s)"
-# #             )
-
-# #         for message_id, fields in messages:
-
-# #             try:
-
-# #                 await process_message(
-# #                     redis_client,
-# #                     message_id,
-# #                     fields,
-# #                 )
-
-# #                 recovered_total += 1
-
-# #             except Exception as error:
-
-# #                 print(
-# #                     "[HEARTBEAT PENDING "
-# #                     "ISOLATION ERROR] "
-# #                     f"{message_id}: {error}"
-# #                 )
-
-# #         # ----------------------------------------------------
-# #         # XAUTOCLAIM returns the next cursor.
-# #         # When it reaches 0-0, recovery is complete.
-# #         # ----------------------------------------------------
-
-# #         next_start_id = decode(
-# #             next_start_id
-# #         )
-
-# #         if (
-# #             not messages
-# #             and next_start_id == "0-0"
-# #         ):
-# #             break
-
-# #         if next_start_id == "0-0":
-# #             break
-
-# #         start_id = next_start_id
-
-# #     if recovered_total:
-
-# #         print(
-# #             f"[HEARTBEAT] "
-# #             f"Recovered {recovered_total} "
-# #             f"pending message(s)"
-# #         )
-
-# #     else:
-
-# #         print(
-# #             "[HEARTBEAT] "
-# #             "No stale pending messages recovered."
-# #         )
-
-
-# # # ============================================================
-# # # NEW MESSAGE CONSUMPTION
-# # # ============================================================
-
-# # async def consume_new_messages(
-# #     redis_client,
-# # ):
-# #     """
-# #     Consume new messages from events.system.
-# #     """
-
-# #     messages = await redis_client.xreadgroup(
-# #         groupname=GROUP_NAME,
-# #         consumername=CONSUMER_NAME,
-# #         streams={
-# #             STREAM_NAME: ">"
-# #         },
-# #         count=READ_COUNT,
-# #         block=BLOCK_MS,
-# #     )
-
-# #     if not messages:
-# #         return
-
-# #     for _, stream_messages in messages:
-
-# #         for message_id, fields in stream_messages:
-
-# #             try:
-
-# #                 await process_message(
-# #                     redis_client,
-# #                     message_id,
-# #                     fields,
-# #                 )
-
-# #             except Exception as error:
-
-# #                 print(
-# #                     "[HEARTBEAT MESSAGE "
-# #                     "ISOLATION ERROR] "
-# #                     f"{message_id}: {error}"
-# #                 )
-
-
-# # # ============================================================
-# # # MAIN CONSUMER LOOP
-# # # ============================================================
-
-# # async def heartbeat_consumer_loop(
-# #     redis_client,
-# # ):
-# #     """
-# #     Main heartbeat consumer.
-
-# #     Lifecycle:
-
-# #         Redis connection
-# #              ↓
-# #         Ensure consumer group
-# #              ↓
-# #         Recover stale pending messages
-# #              ↓
-# #         Consume new heartbeats forever
-# #              ↓
-# #         Recover automatically after transient errors
-# #     """
-
-# #     await ensure_consumer_group(
-# #         redis_client
-# #     )
-
-# #     print(
-# #         f"[HEARTBEAT] Consumer started: "
-# #         f"{STREAM_NAME}/{GROUP_NAME}"
-# #     )
-
-# #     # --------------------------------------------------------
-# #     # Recover messages left behind by a previous consumer.
-# #     # --------------------------------------------------------
-
-# #     try:
-
-# #         await recover_pending_messages(
-# #             redis_client
-# #         )
-
-# #     except Exception as error:
-
-# #         print(
-# #             "[HEARTBEAT] "
-# #             f"Initial pending recovery failed: {error}"
-# #         )
-
-# #     # --------------------------------------------------------
-# #     # Continuous consumption.
-# #     # --------------------------------------------------------
-
-# #     while True:
-
-# #         try:
-
-# #             await consume_new_messages(
-# #                 redis_client
-# #             )
-
-# #         except asyncio.CancelledError:
-
-# #             print(
-# #                 "[HEARTBEAT] "
-# #                 "Consumer cancellation received."
-# #             )
-
-# #             raise
-
-# #         except Exception as error:
-
-# #             print(
-# #                 "[HEARTBEAT CONSUMER ERROR] "
-# #                 f"{error}"
-# #             )
-
-# #             # ------------------------------------------------
-# #             # Redis/network failure should affect only the
-# #             # heartbeat consumer.
-# #             # ------------------------------------------------
-
-# #             await asyncio.sleep(
-# #                 RETRY_DELAY
-# #             )
-
-# #             # ------------------------------------------------
-# #             # Retry pending recovery after a consumer error.
-# #             # ------------------------------------------------
-
-# #             try:
-
-# #                 await recover_pending_messages(
-# #                     redis_client
-# #                 )
-
-# #             except Exception as recovery_error:
-
-# #                 print(
-# #                     "[HEARTBEAT] "
-# #                     f"Pending recovery retry failed: "
-# #                     f"{recovery_error}"
-# #                 )
-
-
-# # # ============================================================
-# # # STANDALONE ENTRY POINT
-# # # ============================================================
-
-# # async def main():
-
-# #     redis_client = redis.Redis(
-# #         host=REDIS_HOST,
-# #         port=REDIS_PORT,
-# #         decode_responses=True,
-# #         socket_timeout=None,
-# #         health_check_interval=30,
-# #     )
-
-# #     try:
-
-# #         await heartbeat_consumer_loop(
-# #             redis_client
-# #         )
-
-# #     finally:
-
-# #         await redis_client.aclose()
-
-
-# # if __name__ == "__main__":
-
-# #     asyncio.run(
-# #         main()
-# #     )
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# import asyncio
-# import json
-# import os
-
-# import redis.asyncio as redis
-
-# from backend.app.monitoring.agent_registry import agent_registry
-
-
-# # ============================================================
-# # REDIS CONFIGURATION
-# # ============================================================
-
-# REDIS_HOST = os.getenv(
-#     "REDIS_HOST",
-#     "localhost",
-# )
-
-# REDIS_PORT = int(
-#     os.getenv(
-#         "REDIS_PORT",
-#         "6379",
-#     )
-# )
-
-
-# # ============================================================
-# # STREAM CONFIGURATION
-# # ============================================================
-
-# STREAM_NAME = "events.system"
-
-# GROUP_NAME = "heartbeat-workers"
-
-# CONSUMER_NAME = os.getenv(
-#     "HEARTBEAT_CONSUMER_NAME",
-#     "heartbeat-consumer-01",
-# )
-
-
-# # ============================================================
-# # CONSUMER CONFIGURATION
-# # ============================================================
-
-# READ_COUNT = int(
-#     os.getenv(
-#         "HEARTBEAT_READ_COUNT",
-#         "10",
-#     )
-# )
-
-# BLOCK_MS = int(
-#     os.getenv(
-#         "HEARTBEAT_BLOCK_MS",
-#         "5000",
-#     )
-# )
-
-# RETRY_DELAY = float(
-#     os.getenv(
-#         "HEARTBEAT_RETRY_DELAY",
-#         "2",
-#     )
-# )
-
-
-# # ============================================================
-# # PENDING MESSAGE RECOVERY
-# # ============================================================
-
-# PENDING_IDLE_MS = int(
-#     os.getenv(
-#         "HEARTBEAT_PENDING_IDLE_MS",
-#         "15000",
-#     )
-# )
-
-
-# # ============================================================
-# # DECODING HELPERS
-# # ============================================================
-
-# def decode(value):
-#     """
-#     Convert Redis bytes into UTF-8 strings.
-
-#     Compatible with both:
-#         decode_responses=True
-#         decode_responses=False
-#     """
-
-#     if isinstance(value, bytes):
-#         return value.decode(
-#             "utf-8",
-#             errors="replace",
-#         )
-
-#     return value
-
-
-# def normalize_fields(fields):
-#     """
-#     Normalize Redis fields into string keys/values.
-#     """
-
-#     return {
-#         decode(key): decode(value)
-#         for key, value in fields.items()
-#     }
-
-
-# # ============================================================
-# # HEARTBEAT PARSING
-# # ============================================================
-
-# def parse_heartbeat(fields):
-#     """
-#     Parse supported heartbeat formats.
-
-#     Supported formats:
-
-#     1. BaseAgent:
-#         {
-#             "event": "<JSON>"
-#         }
-
-#     2. Direct Redis fields.
-
-#     Returns:
-#         normalized heartbeat dictionary
-#         or None
-#     """
-
-#     fields = normalize_fields(fields)
-
-#     event = fields.get("event")
-
-#     if event:
-#         if isinstance(event, str):
-#             try:
-#                 event = json.loads(event)
-#             except json.JSONDecodeError:
-#                 return None
-
-#         if isinstance(event, dict):
-#             merged = {
-#                 **fields,
-#                 **event,
-#             }
-
-#             fields = merged
-
-#     # --------------------------------------------------------
-#     # Verify event type
-#     # --------------------------------------------------------
-
-#     if fields.get("event_type") != "agent.heartbeat":
-#         return None
-
-#     # --------------------------------------------------------
-#     # Find agent ID
-#     # --------------------------------------------------------
-
-#     agent_id = (
-#         fields.get("source_agent_id")
-#         or fields.get("agent_id")
-#     )
-
-#     # --------------------------------------------------------
-#     # Support nested source object
-#     # --------------------------------------------------------
-
-#     if not agent_id:
-
-#         source = fields.get("source")
-
-#         if isinstance(source, str):
-#             try:
-#                 source = json.loads(source)
-#             except json.JSONDecodeError:
-#                 source = None
-
-#         if isinstance(source, dict):
-#             agent_id = source.get("agent_id")
-
-#     if not agent_id:
-#         return None
-
-#     return {
-#         "agent_id": agent_id,
-#         "status": fields.get(
-#             "status",
-#             "alive",
-#         ),
-#         "event_id": fields.get(
-#             "event_id"
-#         ),
-#         "timestamp": fields.get(
-#             "timestamp"
-#         ),
-#         "instance_id": fields.get(
-#             "instance_id"
-#         ),
-#         "hostname": fields.get(
-#             "hostname"
-#         ),
-#     }
-
-
-# # ============================================================
-# # CONSUMER GROUP
-# # ============================================================
-
-# async def ensure_consumer_group(
-#     redis_client,
-# ):
-#     """
-#     Ensure the heartbeat consumer group exists.
-#     """
-
-#     try:
-
-#         await redis_client.xgroup_create(
-#             STREAM_NAME,
-#             GROUP_NAME,
-#             id="0-0",
-#             mkstream=True,
-#         )
-
-#         print(
-#             f"[HEARTBEAT] Created consumer group "
-#             f"{GROUP_NAME}"
-#         )
-
-#     except redis.ResponseError as error:
-
-#         if "BUSYGROUP" not in str(error):
-#             raise
-
-
-# # ============================================================
-# # ACKNOWLEDGEMENT
-# # ============================================================
-
-# async def acknowledge(
-#     redis_client,
-#     message_id,
-# ):
-#     """
-#     ACK a successfully processed message.
-#     """
-
-#     await redis_client.xack(
-#         STREAM_NAME,
-#         GROUP_NAME,
-#         message_id,
-#     )
-
-
-# # ============================================================
-# # MESSAGE PROCESSING
-# # ============================================================
-
-# async def process_message(
-#     redis_client,
-#     message_id,
-#     fields,
-#     *,
-#     recovered=False,
-# ):
-#     """
-#     Process exactly one heartbeat message.
-
-#     Important:
-
-#     A Redis message timestamp is NOT the same thing as the
-#     time at which the consumer processed the message.
-
-#     For normal heartbeats, registry update is valid.
-
-#     For recovered pending messages, the heartbeat is only
-#     accepted if its event timestamp is still reasonably fresh.
-
-#     This prevents XAUTOCLAIM from converting an old heartbeat
-#     into a brand-new heartbeat.
-#     """
-
-#     try:
-
-#         heartbeat = parse_heartbeat(fields)
-
-#         # ----------------------------------------------------
-#         # Ignore irrelevant / malformed messages
-#         # ----------------------------------------------------
-
-#         if heartbeat is None:
-
-#             await acknowledge(
-#                 redis_client,
-#                 message_id,
-#             )
-
-#             return
-
-#         agent_id = heartbeat["agent_id"]
-
-#         # ----------------------------------------------------
-#         # Determine whether this heartbeat is fresh
-#         # ----------------------------------------------------
-
-#         heartbeat_timestamp = heartbeat.get(
-#             "timestamp"
-#         )
-
-#         heartbeat_age = None
-
-#         if heartbeat_timestamp:
-
-#             try:
-
-#                 from datetime import datetime, timezone
-
-#                 heartbeat_dt = datetime.fromisoformat(
-#                     heartbeat_timestamp.replace(
-#                         "Z",
-#                         "+00:00",
-#                     )
-#                 )
-
-#                 if heartbeat_dt.tzinfo is None:
-#                     heartbeat_dt = heartbeat_dt.replace(
-#                         tzinfo=timezone.utc
-#                     )
-
-#                 now = datetime.now(timezone.utc)
-
-#                 heartbeat_age = (
-#                     now - heartbeat_dt
-#                 ).total_seconds()
-
-#             except Exception as timestamp_error:
-
-#                 print(
-#                     "[HEARTBEAT] "
-#                     f"Invalid timestamp for "
-#                     f"{agent_id}: "
-#                     f"{timestamp_error}"
-#                 )
-
-#         # ----------------------------------------------------
-#         # Recovered messages
-#         # ----------------------------------------------------
-
-#         if recovered:
-
-#             # ------------------------------------------------
-#             # If timestamp is available and already older than
-#             # the heartbeat timeout, do NOT refresh the agent.
-#             #
-#             # The supervisor must be allowed to detect the
-#             # actual heartbeat gap.
-#             # ------------------------------------------------
-
-#             heartbeat_timeout = float(
-#                 os.getenv(
-#                     "HEARTBEAT_TIMEOUT",
-#                     "30",
-#                 )
-#             )
-
-#             if (
-#                 heartbeat_age is not None
-#                 and heartbeat_age > heartbeat_timeout
-#             ):
-
-#                 print(
-#                     "[HEARTBEAT] Ignoring stale recovered "
-#                     f"heartbeat for {agent_id} "
-#                     f"(age={heartbeat_age:.1f}s)"
-#                 )
-
-#                 await acknowledge(
-#                     redis_client,
-#                     message_id,
-#                 )
-
-#                 return
-
-#         # ----------------------------------------------------
-#         # Update registry
-#         # ----------------------------------------------------
-
-#         agent_registry.update_heartbeat(
-#             agent_id=agent_id,
-#             instance_id=heartbeat.get(
-#                 "instance_id"
-#             ),
-#             hostname=heartbeat.get(
-#                 "hostname"
-#             ),
-#         )
-
-#         if recovered:
-
-#             print(
-#                 "[HEARTBEAT] "
-#                 f"Recovered heartbeat accepted: "
-#                 f"{agent_id}"
-#             )
-
-#         else:
-
-#             print(
-#                 "[HEARTBEAT] "
-#                 f"{agent_id} -> ALIVE"
-#             )
-
-#         # ----------------------------------------------------
-#         # ACK only after successful registry update
-#         # ----------------------------------------------------
-
-#         await acknowledge(
-#             redis_client,
-#             message_id,
-#         )
-
-#     except Exception as error:
-
-#         print(
-#             "[HEARTBEAT ERROR] "
-#             f"message={message_id} "
-#             f"error={error}"
-#         )
-
-#         # Do NOT ACK failed messages.
-#         #
-#         # Redis keeps them pending so they can be recovered.
-
-
-# # ============================================================
-# # PENDING MESSAGE RECOVERY
-# # ============================================================
-
-# async def recover_pending_messages(
-#     redis_client,
-# ):
-#     """
-#     Recover stale pending messages belonging to crashed
-#     heartbeat consumers.
-
-#     Uses XAUTOCLAIM.
-
-#     IMPORTANT:
-#     Old heartbeat events are not allowed to refresh an
-#     agent's heartbeat timestamp.
-#     """
-
-#     print(
-#         "[HEARTBEAT] "
-#         f"Checking pending messages "
-#         f"(idle >= {PENDING_IDLE_MS}ms)"
-#     )
-
-#     start_id = "0-0"
-
-#     recovered_total = 0
-
-#     while True:
-
-#         try:
-
-#             result = await redis_client.xautoclaim(
-#                 STREAM_NAME,
-#                 GROUP_NAME,
-#                 CONSUMER_NAME,
-#                 PENDING_IDLE_MS,
-#                 start_id,
-#                 count=READ_COUNT,
-#             )
-
-#         except redis.ResponseError as error:
-
-#             print(
-#                 "[HEARTBEAT] "
-#                 f"Pending recovery error: {error}"
-#             )
-
-#             return
-
-#         if not result:
-#             return
-
-#         next_start_id = result[0]
-
-#         messages = result[1]
-
-#         if messages:
-
-#             print(
-#                 "[HEARTBEAT] "
-#                 f"Recovering {len(messages)} "
-#                 f"pending message(s)"
-#             )
-
-#         for message_id, fields in messages:
-
-#             try:
-
-#                 await process_message(
-#                     redis_client,
-#                     message_id,
-#                     fields,
-#                     recovered=True,
-#                 )
-
-#                 recovered_total += 1
-
-#             except Exception as error:
-
-#                 print(
-#                     "[HEARTBEAT PENDING "
-#                     "ISOLATION ERROR] "
-#                     f"{message_id}: {error}"
-#                 )
-
-#         next_start_id = decode(
-#             next_start_id
-#         )
-
-#         if next_start_id == "0-0":
-#             break
-
-#         start_id = next_start_id
-
-#     if recovered_total:
-
-#         print(
-#             "[HEARTBEAT] "
-#             f"Recovered {recovered_total} "
-#             f"pending message(s)"
-#         )
-
-#     else:
-
-#         print(
-#             "[HEARTBEAT] "
-#             "No stale pending messages recovered."
-#         )
-
-
-# # ============================================================
-# # NEW MESSAGE CONSUMPTION
-# # ============================================================
-
-# async def consume_new_messages(
-#     redis_client,
-# ):
-#     """
-#     Consume newly delivered messages.
-#     """
-
-#     messages = await redis_client.xreadgroup(
-#         groupname=GROUP_NAME,
-#         consumername=CONSUMER_NAME,
-#         streams={
-#             STREAM_NAME: ">"
-#         },
-#         count=READ_COUNT,
-#         block=BLOCK_MS,
-#     )
-
-#     if not messages:
-#         return
-
-#     for _, stream_messages in messages:
-
-#         for message_id, fields in stream_messages:
-
-#             try:
-
-#                 await process_message(
-#                     redis_client,
-#                     message_id,
-#                     fields,
-#                     recovered=False,
-#                 )
-
-#             except Exception as error:
-
-#                 print(
-#                     "[HEARTBEAT MESSAGE "
-#                     "ISOLATION ERROR] "
-#                     f"{message_id}: {error}"
-#                 )
-
-
-# # ============================================================
-# # MAIN CONSUMER LOOP
-# # ============================================================
-
-# async def heartbeat_consumer_loop(
-#     redis_client,
-# ):
-#     """
-#     Main heartbeat consumer.
-
-#     Lifecycle:
-
-#         Redis
-#           ↓
-#         Consumer Group
-#           ↓
-#         Pending Recovery
-#           ↓
-#         New Heartbeats
-#           ↓
-#         AgentRegistry
-#     """
-
-#     await ensure_consumer_group(
-#         redis_client
-#     )
-
-#     print(
-#         "[HEARTBEAT] Consumer started: "
-#         f"{STREAM_NAME}/{GROUP_NAME}"
-#     )
-
-#     # --------------------------------------------------------
-#     # Recover pending messages left by previous consumers
-#     # --------------------------------------------------------
-
-#     try:
-
-#         await recover_pending_messages(
-#             redis_client
-#         )
-
-#     except Exception as error:
-
-#         print(
-#             "[HEARTBEAT] "
-#             f"Initial pending recovery failed: "
-#             f"{error}"
-#         )
-
-#     # --------------------------------------------------------
-#     # Continuous consumption
-#     # --------------------------------------------------------
-
-#     while True:
-
-#         try:
-
-#             await consume_new_messages(
-#                 redis_client
-#             )
-
-#         except asyncio.CancelledError:
-
-#             print(
-#                 "[HEARTBEAT] "
-#                 "Consumer cancellation received."
-#             )
-
-#             raise
-
-#         except Exception as error:
-
-#             print(
-#                 "[HEARTBEAT CONSUMER ERROR] "
-#                 f"{error}"
-#             )
-
-#             await asyncio.sleep(
-#                 RETRY_DELAY
-#             )
-
-#             try:
-
-#                 await recover_pending_messages(
-#                     redis_client
-#                 )
-
-#             except Exception as recovery_error:
-
-#                 print(
-#                     "[HEARTBEAT] "
-#                     f"Pending recovery retry failed: "
-#                     f"{recovery_error}"
-#                 )
-
-
-# # ============================================================
-# # STANDALONE ENTRY POINT
-# # ============================================================
-
-# async def main():
-
-#     redis_client = redis.Redis(
-#         host=REDIS_HOST,
-#         port=REDIS_PORT,
-#         decode_responses=True,
-#         socket_timeout=None,
-#         health_check_interval=30,
-#     )
-
-#     try:
-
-#         await heartbeat_consumer_loop(
-#             redis_client
-#         )
-
-#     finally:
-
-#         await redis_client.aclose()
-
-
-# # ============================================================
-# # ENTRY POINT
-# # ============================================================
-
-# if __name__ == "__main__":
-
-#     asyncio.run(
-#         main()
-#     )
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 """
 Heartbeat consumer and monitoring bridge.
 
-Responsibilities:
-
+Responsibilities
+----------------
 - Consume agent heartbeat events from Redis Streams.
-- Parse the current heartbeat format emitted by shared.heartbeat.
-- Support legacy heartbeat formats where practical.
-- Update AgentRegistry with agent identity and liveness.
+- Parse the current heartbeat event format.
+- Support practical legacy/wrapped heartbeat formats.
+- Validate heartbeat identity and timestamps.
+- Reject stale and out-of-order heartbeats.
+- Update AgentRegistry with accepted liveness.
 - Recover stale pending messages with XAUTOCLAIM.
 - Never allow one malformed heartbeat to terminate the consumer.
-- Never acknowledge a heartbeat before successful processing.
-- Never allow an old recovered heartbeat to falsely refresh liveness.
+- Never acknowledge a message before it has been intentionally handled.
+- Isolate failures between individual messages.
+- Survive Redis/network/registry errors.
 
-Heartbeat stream:
+Heartbeat stream
+----------------
+events.system
 
-    events.system
+Consumer group
+--------------
+heartbeat-workers
 
-Consumer group:
+Architecture
+------------
+Agent
+    |
+    | heartbeat
+    v
+Redis events.system
+    |
+    v
+heartbeat_consumer.py
+    |
+    | accepted heartbeat
+    v
+AgentRegistry
+    |
+    v
+watchdog.py
+    |
+    v
+supervisor.py
 
-    heartbeat-workers
+Important
+---------
+This component does NOT:
+- restart processes
+- terminate processes
+- mark agents DEAD
+- make recovery decisions
+- consume camera streams
+- process video frames
+- run AI inference
+
+Recovery belongs to supervisor.py.
+Observation belongs to watchdog.py.
 """
 
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import os
+import socket
+import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -2170,105 +83,104 @@ from backend.app.monitoring.agent_registry import agent_registry
 REDIS_HOST = os.getenv(
     "REDIS_HOST",
     "localhost",
-)
+).strip() or "localhost"
 
-try:
-    REDIS_PORT = int(
-        os.getenv(
-            "REDIS_PORT",
-            "6379",
-        )
-    )
-except ValueError:
-    REDIS_PORT = 6379
-
-
-# ============================================================
-# STREAM CONFIGURATION
-# ============================================================
-
-STREAM_NAME = os.getenv(
-    "HEARTBEAT_STREAM",
-    "events.system",
-)
-
-GROUP_NAME = os.getenv(
-    "HEARTBEAT_GROUP",
-    "heartbeat-workers",
-)
-
-CONSUMER_NAME = os.getenv(
-    "HEARTBEAT_CONSUMER_NAME",
-    "heartbeat-consumer-01",
-)
-
-
-# ============================================================
-# CONSUMER CONFIGURATION
-# ============================================================
 
 def _positive_int(
     name: str,
     default: int,
 ) -> int:
+    raw = os.getenv(
+        name,
+        str(default),
+    )
+
     try:
-        value = int(
-            os.getenv(
-                name,
-                str(default),
-            )
-        )
-
-        if value <= 0:
-            return default
-
-        return value
-
+        value = int(raw)
     except (TypeError, ValueError):
         return default
+
+    return value if value > 0 else default
 
 
 def _non_negative_int(
     name: str,
     default: int,
 ) -> int:
+    raw = os.getenv(
+        name,
+        str(default),
+    )
+
     try:
-        value = int(
-            os.getenv(
-                name,
-                str(default),
-            )
-        )
-
-        if value < 0:
-            return default
-
-        return value
-
+        value = int(raw)
     except (TypeError, ValueError):
         return default
+
+    return value if value >= 0 else default
 
 
 def _positive_float(
     name: str,
     default: float,
 ) -> float:
+    raw = os.getenv(
+        name,
+        str(default),
+    )
+
     try:
-        value = float(
-            os.getenv(
-                name,
-                str(default),
-            )
-        )
-
-        if value <= 0:
-            return default
-
-        return value
-
+        value = float(raw)
     except (TypeError, ValueError):
         return default
 
+    return value if value > 0 else default
+
+
+REDIS_PORT = _positive_int(
+    "REDIS_PORT",
+    6379,
+)
+
+
+# ============================================================
+# STREAM CONFIGURATION
+# ============================================================
+
+STREAM_NAME = (
+    os.getenv(
+        "HEARTBEAT_STREAM",
+        "events.system",
+    ).strip()
+    or "events.system"
+)
+
+GROUP_NAME = (
+    os.getenv(
+        "HEARTBEAT_GROUP",
+        "heartbeat-workers",
+    ).strip()
+    or "heartbeat-workers"
+)
+
+DEFAULT_CONSUMER_NAME = (
+    f"heartbeat-consumer-"
+    f"{socket.gethostname()}-"
+    f"{uuid.uuid4().hex[:8]}"
+)
+
+CONSUMER_NAME = (
+    os.getenv(
+        "HEARTBEAT_CONSUMER_NAME",
+        DEFAULT_CONSUMER_NAME,
+    ).strip()
+    or DEFAULT_CONSUMER_NAME
+)
+
+
+# ============================================================
+# CONSUMER CONFIGURATION
+# ============================================================
 
 READ_COUNT = _positive_int(
     "HEARTBEAT_READ_COUNT",
@@ -2283,6 +195,11 @@ BLOCK_MS = _positive_int(
 RETRY_DELAY = _positive_float(
     "HEARTBEAT_RETRY_DELAY",
     2.0,
+)
+
+PENDING_RECOVERY_INTERVAL = _positive_float(
+    "HEARTBEAT_PENDING_RECOVERY_INTERVAL",
+    15.0,
 )
 
 
@@ -2305,9 +222,14 @@ HEARTBEAT_TIMEOUT = _positive_float(
     30.0,
 )
 
+MAX_CLOCK_SKEW_SECONDS = _positive_float(
+    "HEARTBEAT_MAX_CLOCK_SKEW",
+    10.0,
+)
+
 
 # ============================================================
-# REDIS TIMEOUT CONFIGURATION
+# REDIS SOCKET CONFIGURATION
 # ============================================================
 
 REDIS_SOCKET_CONNECT_TIMEOUT = _positive_float(
@@ -2322,6 +244,38 @@ REDIS_SOCKET_TIMEOUT = _positive_float(
 
 
 # ============================================================
+# HEARTBEAT EVENT CONFIGURATION
+# ============================================================
+
+HEARTBEAT_EVENT_TYPE = "agent.heartbeat"
+
+VALID_HEARTBEAT_STATUSES = {
+    "alive",
+}
+
+
+# ============================================================
+# DATA MODEL
+# ============================================================
+
+@dataclass(frozen=True)
+class Heartbeat:
+    """
+    Normalized heartbeat representation.
+    """
+
+    agent_id: str
+    instance_id: str
+    hostname: Optional[str]
+    status: str
+    timestamp: datetime
+    event_id: Optional[str]
+    event_type: str
+    version: Optional[str]
+    generation: Optional[int]
+
+
+# ============================================================
 # DECODING HELPERS
 # ============================================================
 
@@ -2329,12 +283,11 @@ def decode(
     value: Any,
 ) -> Any:
     """
-    Convert Redis bytes to UTF-8 strings.
+    Decode Redis bytes safely.
 
-    Works with both:
-
-        decode_responses=True
-        decode_responses=False
+    Supports both:
+    - decode_responses=True
+    - decode_responses=False
     """
 
     if isinstance(value, bytes):
@@ -2350,10 +303,13 @@ def normalize_fields(
     fields: Any,
 ) -> dict[str, Any]:
     """
-    Normalize Redis stream field keys and values.
+    Normalize Redis stream fields.
     """
 
-    if not isinstance(fields, dict):
+    if not isinstance(
+        fields,
+        dict,
+    ):
         return {}
 
     return {
@@ -2370,15 +326,21 @@ def parse_json_object(
     value: Any,
 ) -> Optional[dict[str, Any]]:
     """
-    Parse a dictionary or JSON-encoded dictionary.
-
-    Returns None for invalid/non-object values.
+    Parse a dictionary or JSON object string.
     """
 
-    if isinstance(value, dict):
+    if isinstance(
+        value,
+        dict,
+    ):
         return value
 
-    if not isinstance(value, str):
+    value = decode(value)
+
+    if not isinstance(
+        value,
+        str,
+    ):
         return None
 
     value = value.strip()
@@ -2388,10 +350,16 @@ def parse_json_object(
 
     try:
         parsed = json.loads(value)
-    except (json.JSONDecodeError, TypeError):
+    except (
+        json.JSONDecodeError,
+        TypeError,
+    ):
         return None
 
-    if isinstance(parsed, dict):
+    if isinstance(
+        parsed,
+        dict,
+    ):
         return parsed
 
     return None
@@ -2405,12 +373,15 @@ def parse_timestamp(
     timestamp: Any,
 ) -> Optional[datetime]:
     """
-    Convert an ISO-8601 timestamp to timezone-aware UTC.
-
-    Returns None when the timestamp cannot be parsed.
+    Parse ISO-8601 timestamp and normalize to UTC.
     """
 
-    if not isinstance(timestamp, str):
+    timestamp = decode(timestamp)
+
+    if not isinstance(
+        timestamp,
+        str,
+    ):
         return None
 
     timestamp = timestamp.strip()
@@ -2425,47 +396,91 @@ def parse_timestamp(
                 "+00:00",
             )
         )
+    except (
+        ValueError,
+        TypeError,
+    ):
+        return None
 
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(
-                tzinfo=timezone.utc,
-            )
-
-        return parsed.astimezone(
-            timezone.utc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(
+            tzinfo=timezone.utc,
         )
 
-    except (ValueError, TypeError):
-        return None
-
-
-def heartbeat_age_seconds(
-    timestamp: Any,
-) -> Optional[float]:
-    """
-    Calculate heartbeat age using the heartbeat event timestamp.
-    """
-
-    parsed = parse_timestamp(
-        timestamp
-    )
-
-    if parsed is None:
-        return None
-
-    now = datetime.now(
+    return parsed.astimezone(
         timezone.utc
     )
 
+
+def heartbeat_age_seconds(
+    timestamp: datetime,
+    *,
+    now: Optional[datetime] = None,
+) -> Optional[float]:
+    """
+    Calculate heartbeat age.
+
+    Future timestamps beyond MAX_CLOCK_SKEW_SECONDS
+    are rejected.
+    """
+
+    if now is None:
+        now = datetime.now(
+            timezone.utc
+        )
+
     age = (
-        now - parsed
+        now - timestamp
     ).total_seconds()
 
-    # Future timestamps should not produce a negative age.
+    if age < -MAX_CLOCK_SKEW_SECONDS:
+        return None
+
     return max(
         0.0,
         age,
     )
+
+
+# ============================================================
+# GENERATION HELPERS
+# ============================================================
+
+def parse_generation(
+    value: Any,
+) -> Optional[int]:
+    """
+    Parse optional process generation.
+
+    Generation is optional here for compatibility with older
+    heartbeat producers.
+
+    If present, it must be a non-negative integer.
+    """
+
+    if value is None:
+        return None
+
+    value = decode(value)
+
+    if isinstance(
+        value,
+        bool,
+    ):
+        return None
+
+    try:
+        generation = int(value)
+    except (
+        TypeError,
+        ValueError,
+    ):
+        return None
+
+    if generation < 0:
+        return None
+
+    return generation
 
 
 # ============================================================
@@ -2474,116 +489,96 @@ def heartbeat_age_seconds(
 
 def parse_heartbeat(
     fields: Any,
-) -> Optional[dict[str, Any]]:
+) -> Optional[Heartbeat]:
     """
-    Parse the current heartbeat format.
+    Parse and normalize a heartbeat event.
 
-    Current producer format:
+    Supported current format:
 
         {
             "event_id": "...",
             "event_type": "agent.heartbeat",
             "version": "1.0",
             "timestamp": "...",
-            "source": "<JSON string>",
-            "data": "<JSON string>",
+            "source": "{...}",
+            "data": "{...}",
             "agent_id": "...",
             "instance_id": "...",
             "hostname": "...",
+            "generation": 1,
             "status": "alive"
         }
 
-    Also supports older formats where heartbeat data may be
-    wrapped inside an "event" JSON field.
-
-    Returns:
-
-        normalized heartbeat dictionary
-
-    or:
-
-        None
+    Legacy support:
+    - event={JSON object}
+    - source={JSON object}
+    - data={JSON object}
     """
 
-    fields = normalize_fields(
+    normalized = normalize_fields(
         fields
     )
 
-    if not fields:
+    if not normalized:
         return None
 
     # --------------------------------------------------------
-    # Legacy / wrapped event format
+    # Legacy wrapped event
     # --------------------------------------------------------
 
-    event = fields.get(
-        "event"
+    wrapped_event = parse_json_object(
+        normalized.get("event")
     )
 
-    if event is not None:
+    if wrapped_event:
+        merged = {
+            **normalized,
+            **wrapped_event,
+        }
+    else:
+        merged = dict(normalized)
 
-        parsed_event = parse_json_object(
-            event
-        )
+    # --------------------------------------------------------
+    # Source/data payloads
+    # --------------------------------------------------------
 
-        if parsed_event is not None:
+    source = parse_json_object(
+        merged.get("source")
+    )
 
-            merged = {
-                **fields,
-                **parsed_event,
-            }
-
-            fields = merged
+    data = parse_json_object(
+        merged.get("data")
+    )
 
     # --------------------------------------------------------
     # Event type
     # --------------------------------------------------------
 
-    event_type = fields.get(
-        "event_type"
+    event_type = (
+        merged.get("event_type")
+        or merged.get("type")
     )
 
-    if event_type != "agent.heartbeat":
+    if event_type is not None:
+        event_type = str(
+            event_type
+        ).strip()
+
+    # Practical legacy compatibility.
+    if event_type not in {
+        HEARTBEAT_EVENT_TYPE,
+        "heartbeat",
+        "agent_heartbeat",
+    }:
         return None
 
     # --------------------------------------------------------
-    # Parse source
-    # --------------------------------------------------------
-
-    source = parse_json_object(
-        fields.get(
-            "source"
-        )
-    )
-
-    # --------------------------------------------------------
-    # Parse data
-    # --------------------------------------------------------
-
-    data = parse_json_object(
-        fields.get(
-            "data"
-        )
-    )
-
-    # --------------------------------------------------------
     # Agent identity
-    #
-    # Current producer exposes these directly:
-    #
-    #   agent_id
-    #   instance_id
-    #   hostname
-    #
-    # Older formats may use:
-    #
-    #   source_agent_id
-    #   source.instance
     # --------------------------------------------------------
 
     agent_id = (
-        fields.get("agent_id")
-        or fields.get("source_agent_id")
+        merged.get("agent_id")
+        or merged.get("source_agent_id")
     )
 
     if not agent_id and source:
@@ -2591,12 +586,28 @@ def parse_heartbeat(
             "agent_id"
         )
 
+    if not agent_id and data:
+        agent_id = data.get(
+            "agent_id"
+        )
+
+    if agent_id is None:
+        return None
+
+    agent_id = str(
+        agent_id
+    ).strip()
+
     if not agent_id:
         return None
 
+    # --------------------------------------------------------
+    # Instance identity
+    # --------------------------------------------------------
+
     instance_id = (
-        fields.get("instance_id")
-        or fields.get("source_instance_id")
+        merged.get("instance_id")
+        or merged.get("source_instance_id")
     )
 
     if not instance_id and source:
@@ -2604,59 +615,368 @@ def parse_heartbeat(
             "instance_id"
         )
 
-    hostname = fields.get(
-        "hostname"
+    if not instance_id and data:
+        instance_id = data.get(
+            "instance_id"
+        )
+
+    if instance_id is None:
+        return None
+
+    instance_id = str(
+        instance_id
+    ).strip()
+
+    if not instance_id:
+        return None
+
+    # --------------------------------------------------------
+    # Hostname
+    # --------------------------------------------------------
+
+    hostname = (
+        merged.get("hostname")
+        or (
+            source.get("hostname")
+            if source
+            else None
+        )
+        or (
+            data.get("hostname")
+            if data
+            else None
+        )
     )
 
-    if not hostname and source:
-        hostname = source.get(
-            "hostname"
-        )
+    if hostname is not None:
+        hostname = str(
+            hostname
+        ).strip()
+
+        if not hostname:
+            hostname = None
 
     # --------------------------------------------------------
     # Status
     # --------------------------------------------------------
 
-    status = fields.get(
-        "status"
+    status = (
+        merged.get("status")
+        or (
+            data.get("status")
+            if data
+            else None
+        )
+        or "alive"
     )
 
-    if not status and data:
-        status = data.get(
-            "status"
+    status = str(
+        status
+    ).strip().lower()
+
+    if status not in VALID_HEARTBEAT_STATUSES:
+        return None
+
+    # --------------------------------------------------------
+    # Timestamp
+    # --------------------------------------------------------
+
+    timestamp_raw = (
+        merged.get("timestamp")
+        or (
+            data.get("timestamp")
+            if data
+            else None
+        )
+    )
+
+    timestamp = parse_timestamp(
+        timestamp_raw
+    )
+
+    if timestamp is None:
+        return None
+
+    # --------------------------------------------------------
+    # Generation
+    # --------------------------------------------------------
+
+    generation_raw = (
+        merged.get("generation")
+        or merged.get("process_generation")
+        or (
+            source.get("generation")
+            if source
+            else None
+        )
+        or (
+            data.get("generation")
+            if data
+            else None
+        )
+    )
+
+    generation = parse_generation(
+        generation_raw
+    )
+
+    # If generation was explicitly supplied but invalid,
+    # reject the heartbeat rather than silently accepting it.
+    if (
+        generation_raw is not None
+        and generation is None
+    ):
+        return None
+
+    # --------------------------------------------------------
+    # Event metadata
+    # --------------------------------------------------------
+
+    event_id = merged.get(
+        "event_id"
+    )
+
+    if event_id is not None:
+        event_id = str(
+            event_id
+        ).strip() or None
+
+    version = merged.get(
+        "version"
+    )
+
+    if version is not None:
+        version = str(
+            version
+        ).strip() or None
+
+    return Heartbeat(
+        agent_id=agent_id,
+        instance_id=instance_id,
+        hostname=hostname,
+        status=status,
+        timestamp=timestamp,
+        event_id=event_id,
+        event_type=HEARTBEAT_EVENT_TYPE,
+        version=version,
+        generation=generation,
+    )
+
+
+# ============================================================
+# EVENT ORDER PROTECTION
+# ============================================================
+
+class HeartbeatOrderingGuard:
+    """
+    Prevent an older heartbeat from refreshing liveness after
+    a newer heartbeat was already accepted.
+
+    Key:
+        (agent_id, instance_id)
+
+    Important:
+    This is a process-local safety layer.
+
+    AgentRegistry should ideally persist the accepted heartbeat
+    event timestamp itself for cross-consumer/restart protection.
+    """
+
+    def __init__(self) -> None:
+        self._latest: dict[
+            tuple[str, str],
+            datetime,
+        ] = {}
+
+    def is_newer_or_equal(
+        self,
+        heartbeat: Heartbeat,
+    ) -> bool:
+        key = (
+            heartbeat.agent_id,
+            heartbeat.instance_id,
         )
 
-    if not status:
-        status = "alive"
+        previous = self._latest.get(
+            key
+        )
 
-    return {
-        "agent_id": str(
-            agent_id
-        ),
-        "instance_id": (
-            str(instance_id)
-            if instance_id is not None
-            else None
-        ),
-        "hostname": (
-            str(hostname)
-            if hostname is not None
-            else None
-        ),
-        "status": str(
-            status
-        ),
-        "event_id": fields.get(
-            "event_id"
-        ),
-        "event_type": event_type,
-        "version": fields.get(
-            "version"
-        ),
-        "timestamp": fields.get(
-            "timestamp"
-        ),
+        if (
+            previous is not None
+            and heartbeat.timestamp < previous
+        ):
+            return False
+
+        return True
+
+    def accept(
+        self,
+        heartbeat: Heartbeat,
+    ) -> None:
+        key = (
+            heartbeat.agent_id,
+            heartbeat.instance_id,
+        )
+
+        previous = self._latest.get(
+            key
+        )
+
+        if (
+            previous is None
+            or heartbeat.timestamp > previous
+        ):
+            self._latest[key] = (
+                heartbeat.timestamp
+            )
+
+    def remove_instance(
+        self,
+        agent_id: str,
+        instance_id: str,
+    ) -> None:
+        self._latest.pop(
+            (
+                agent_id,
+                instance_id,
+            ),
+            None,
+        )
+
+
+heartbeat_ordering_guard = (
+    HeartbeatOrderingGuard()
+)
+
+
+# ============================================================
+# AGENT REGISTRY COMPATIBILITY
+# ============================================================
+
+def _registry_update_supports(
+    parameter_name: str,
+) -> bool:
+    """
+    Detect whether the current AgentRegistry implementation
+    supports an optional heartbeat parameter.
+
+    This keeps the consumer compatible while AgentRegistry is
+    evolving through Section 1.
+    """
+
+    try:
+        signature = inspect.signature(
+            agent_registry.update_heartbeat
+        )
+    except (
+        TypeError,
+        ValueError,
+    ):
+        return False
+
+    parameters = signature.parameters
+
+    return (
+        parameter_name in parameters
+        or any(
+            parameter.kind
+            == inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters.values()
+        )
+    )
+
+
+_REGISTRY_SUPPORTS_TIMESTAMP = (
+    _registry_update_supports(
+        "heartbeat_timestamp"
+    )
+    or _registry_update_supports(
+        "timestamp"
+    )
+)
+
+_REGISTRY_SUPPORTS_GENERATION = (
+    _registry_update_supports(
+        "generation"
+    )
+    or _registry_update_supports(
+        "process_generation"
+    )
+)
+
+
+def update_agent_registry(
+    heartbeat: Heartbeat,
+) -> bool:
+    """
+    Update AgentRegistry using the strongest API supported
+    by the currently installed registry implementation.
+
+    Returns:
+        True  -> accepted
+        False -> intentionally rejected
+    """
+
+    kwargs: dict[str, Any] = {
+        "agent_id": heartbeat.agent_id,
+        "instance_id": heartbeat.instance_id,
+        "hostname": heartbeat.hostname,
     }
+
+    try:
+        signature = inspect.signature(
+            agent_registry.update_heartbeat
+        )
+
+        parameters = signature.parameters
+
+        if (
+            heartbeat.generation is not None
+            and _REGISTRY_SUPPORTS_GENERATION
+        ):
+            if "generation" in parameters:
+                kwargs["generation"] = (
+                    heartbeat.generation
+                )
+            elif "process_generation" in parameters:
+                kwargs["process_generation"] = (
+                    heartbeat.generation
+                )
+            else:
+                kwargs["generation"] = (
+                    heartbeat.generation
+                )
+
+        if _REGISTRY_SUPPORTS_TIMESTAMP:
+            if "heartbeat_timestamp" in parameters:
+                kwargs["heartbeat_timestamp"] = (
+                    heartbeat.timestamp
+                )
+            elif "timestamp" in parameters:
+                kwargs["timestamp"] = (
+                    heartbeat.timestamp
+                )
+            else:
+                kwargs["heartbeat_timestamp"] = (
+                    heartbeat.timestamp
+                )
+
+        return bool(
+            agent_registry.update_heartbeat(
+                **kwargs
+            )
+        )
+
+    except TypeError:
+        # Compatibility fallback for the currently installed
+        # registry API.
+        return bool(
+            agent_registry.update_heartbeat(
+                agent_id=heartbeat.agent_id,
+                instance_id=heartbeat.instance_id,
+                hostname=heartbeat.hostname,
+            )
+        )
 
 
 # ============================================================
@@ -2667,25 +987,40 @@ async def ensure_consumer_group(
     redis_client: redis.Redis,
 ) -> None:
     """
-    Ensure the heartbeat consumer group exists.
+    Ensure the consumer group exists.
+
+    GROUP_START_ID controls the initial position only when
+    the group is created for the first time.
+
+    Default:
+        $
+
+    This prevents a newly deployed heartbeat consumer from
+    replaying an entire historical events.system stream.
     """
 
-    try:
+    group_start_id = (
+        os.getenv(
+            "HEARTBEAT_GROUP_START_ID",
+            "$",
+        ).strip()
+        or "$"
+    )
 
+    try:
         await redis_client.xgroup_create(
             STREAM_NAME,
             GROUP_NAME,
-            id="0-0",
+            id=group_start_id,
             mkstream=True,
         )
 
         print(
             "[HEARTBEAT] Created consumer group "
-            f"{GROUP_NAME}"
+            f"{GROUP_NAME} at {group_start_id}"
         )
 
     except redis.ResponseError as error:
-
         if "BUSYGROUP" in str(error):
             return
 
@@ -2701,7 +1036,7 @@ async def acknowledge(
     message_id: Any,
 ) -> None:
     """
-    ACK a successfully processed message.
+    ACK one successfully handled message.
     """
 
     await redis_client.xack(
@@ -2721,35 +1056,41 @@ async def process_message(
     fields: Any,
     *,
     recovered: bool = False,
-) -> None:
+) -> bool:
     """
     Process exactly one heartbeat.
 
-    Rules:
+    ACK policy
+    ----------
+    ACK when:
+    - message is malformed
+    - message is irrelevant
+    - timestamp is invalid
+    - timestamp is too old
+    - heartbeat is out-of-order
+    - registry intentionally rejects it
+    - heartbeat is successfully accepted
 
-    1. Malformed heartbeat -> isolate + ACK.
-    2. Irrelevant event -> isolate + ACK.
-    3. Valid heartbeat -> update registry.
-    4. Registry success -> ACK.
-    5. Processing failure -> DO NOT ACK.
-    6. Old recovered heartbeat -> ACK but do not refresh liveness.
+    DO NOT ACK when:
+    - Redis ACK itself fails
+    - AgentRegistry raises an unexpected exception
+    - another unexpected processing failure occurs
 
-    The consumer itself must never die because of one bad
-    heartbeat.
+    Returns:
+        True  -> message handled and ACK attempted successfully
+        False -> message remains pending for later recovery
     """
 
     try:
-
         heartbeat = parse_heartbeat(
             fields
         )
 
         # ----------------------------------------------------
-        # Ignore malformed / irrelevant messages
+        # Malformed / irrelevant message
         # ----------------------------------------------------
 
         if heartbeat is None:
-
             print(
                 "[HEARTBEAT] Ignoring malformed or "
                 "irrelevant message: "
@@ -2761,99 +1102,128 @@ async def process_message(
                 message_id,
             )
 
-            return
+            return True
 
-        agent_id = heartbeat[
-            "agent_id"
-        ]
-
-        # ----------------------------------------------------
-        # Calculate heartbeat age
-        # ----------------------------------------------------
-
-        timestamp = heartbeat.get(
-            "timestamp"
+        now = datetime.now(
+            timezone.utc
         )
+
+        # ----------------------------------------------------
+        # Future timestamp protection
+        # ----------------------------------------------------
 
         age = heartbeat_age_seconds(
-            timestamp
+            heartbeat.timestamp,
+            now=now,
+        )
+
+        if age is None:
+            print(
+                "[HEARTBEAT] Rejecting future-dated "
+                f"heartbeat: agent={heartbeat.agent_id} "
+                f"instance={heartbeat.instance_id} "
+                f"message={message_id}"
+            )
+
+            await acknowledge(
+                redis_client,
+                message_id,
+            )
+
+            return True
+
+        # ----------------------------------------------------
+        # Stale heartbeat protection
+        # ----------------------------------------------------
+
+        if age > HEARTBEAT_TIMEOUT:
+            print(
+                "[HEARTBEAT] Ignoring stale heartbeat: "
+                f"agent={heartbeat.agent_id} "
+                f"age={age:.1f}s "
+                f"timeout={HEARTBEAT_TIMEOUT:.1f}s "
+                f"recovered={recovered}"
+            )
+
+            await acknowledge(
+                redis_client,
+                message_id,
+            )
+
+            return True
+
+        # ----------------------------------------------------
+        # Out-of-order heartbeat protection
+        # ----------------------------------------------------
+
+        if not heartbeat_ordering_guard.is_newer_or_equal(
+            heartbeat
+        ):
+            print(
+                "[HEARTBEAT] Ignoring out-of-order "
+                f"heartbeat: agent={heartbeat.agent_id} "
+                f"instance={heartbeat.instance_id} "
+                f"timestamp={heartbeat.timestamp.isoformat()} "
+                f"recovered={recovered}"
+            )
+
+            await acknowledge(
+                redis_client,
+                message_id,
+            )
+
+            return True
+
+        # ----------------------------------------------------
+        # Registry update
+        # ----------------------------------------------------
+
+        accepted = update_agent_registry(
+            heartbeat
         )
 
         # ----------------------------------------------------
-        # Invalid timestamp handling
+        # Registry intentionally rejected heartbeat
         # ----------------------------------------------------
 
-        if timestamp and age is None:
-
+        if not accepted:
             print(
-                "[HEARTBEAT] Invalid timestamp for "
-                f"{agent_id}; message={message_id}"
+                "[HEARTBEAT] Registry rejected heartbeat: "
+                f"agent={heartbeat.agent_id} "
+                f"instance={heartbeat.instance_id} "
+                f"generation={heartbeat.generation}"
             )
 
-        # ----------------------------------------------------
-        # Recovered heartbeat
-        # ----------------------------------------------------
-        #
-        # A heartbeat that sat pending longer than the
-        # heartbeat timeout must NOT resurrect/refresh an
-        # agent.
-        #
-        # We ACK it because it has been handled, but do not
-        # update the registry.
-        # ----------------------------------------------------
+            await acknowledge(
+                redis_client,
+                message_id,
+            )
 
-        if recovered:
+            return True
 
-            if (
-                age is not None
-                and age > HEARTBEAT_TIMEOUT
-            ):
-
-                print(
-                    "[HEARTBEAT] Ignoring stale recovered "
-                    f"heartbeat for {agent_id} "
-                    f"(age={age:.1f}s, "
-                    f"timeout={HEARTBEAT_TIMEOUT:.1f}s)"
-                )
-
-                await acknowledge(
-                    redis_client,
-                    message_id,
-                )
-
-                return
-
-        # ----------------------------------------------------
-        # Update registry
-        # ----------------------------------------------------
-
-        agent_registry.update_heartbeat(
-            agent_id=agent_id,
-            instance_id=heartbeat.get(
-                "instance_id"
-            ),
-            hostname=heartbeat.get(
-                "hostname"
-            ),
+        # Registry accepted the heartbeat.
+        heartbeat_ordering_guard.accept(
+            heartbeat
         )
 
         # ----------------------------------------------------
-        # Logging
+        # Success logging
         # ----------------------------------------------------
 
-        if recovered:
+        mode = (
+            "RECOVERED"
+            if recovered
+            else "LIVE"
+        )
 
-            print(
-                "[HEARTBEAT] Recovered heartbeat accepted: "
-                f"{agent_id}"
-            )
-
-        else:
-
-            print(
-                "[HEARTBEAT] "
-                f"{agent_id} -> ALIVE"
-            )
+        print(
+            "[HEARTBEAT] "
+            f"{mode} | "
+            f"agent={heartbeat.agent_id} | "
+            f"instance={heartbeat.instance_id} | "
+            f"generation={heartbeat.generation} | "
+            f"age={age:.2f}s"
+        )
 
         # ----------------------------------------------------
         # ACK ONLY AFTER SUCCESS
@@ -2864,56 +1234,95 @@ async def process_message(
             message_id,
         )
 
+        return True
+
     except asyncio.CancelledError:
         raise
 
     except Exception as error:
-
         print(
             "[HEARTBEAT ERROR] "
             f"message={message_id} "
-            f"error={error}"
+            f"error={type(error).__name__}: "
+            f"{error}"
         )
 
-        # ----------------------------------------------------
-        # IMPORTANT
+        # DO NOT ACK.
         #
-        # Do NOT ACK here.
-        #
-        # Redis keeps the message pending and the recovery
-        # mechanism can retry it later.
-        # ----------------------------------------------------
+        # Redis will keep the message pending and the
+        # recovery mechanism can retry it later.
+
+        return False
 
 
 # ============================================================
 # PENDING MESSAGE RECOVERY
 # ============================================================
 
+def _parse_xautoclaim_result(
+    result: Any,
+) -> tuple[Any, list[Any]]:
+    """
+    Normalize redis-py XAUTOCLAIM response.
+
+    Legacy response:
+        [
+            next_start_id,
+            messages,
+            deleted_message_ids
+        ]
+
+    Unified/alternate clients may return a different shape.
+
+    This function deliberately accepts the standard redis-py
+    positional response while failing safely on unexpected data.
+    """
+
+    if not isinstance(
+        result,
+        (list, tuple),
+    ):
+        return "0-0", []
+
+    if len(result) < 2:
+        return "0-0", []
+
+    next_start_id = result[0]
+    messages = result[1]
+
+    if not isinstance(
+        messages,
+        (list, tuple),
+    ):
+        messages = []
+
+    return (
+        next_start_id,
+        list(messages),
+    )
+
+
 async def recover_pending_messages(
     redis_client: redis.Redis,
-) -> None:
+) -> int:
     """
     Recover stale pending heartbeat messages.
 
-    Uses Redis XAUTOCLAIM.
+    Uses XAUTOCLAIM.
 
-    Old heartbeat events are never allowed to refresh
-    liveness after their timestamp has expired.
+    Returns:
+        Number of pending messages examined.
+
+    Redis XAUTOCLAIM transfers ownership of idle pending
+    entries to this consumer. The command is available from
+    Redis 6.2+. :contentReference[oaicite:2]{index=2}
     """
 
-    print(
-        "[HEARTBEAT] Checking pending messages "
-        f"(idle >= {PENDING_IDLE_MS}ms)"
-    )
-
     start_id = "0-0"
-
-    recovered_total = 0
+    examined_total = 0
 
     while True:
-
         try:
-
             result = await redis_client.xautoclaim(
                 STREAM_NAME,
                 GROUP_NAME,
@@ -2927,47 +1336,30 @@ async def recover_pending_messages(
             raise
 
         except redis.ResponseError as error:
-
             print(
-                "[HEARTBEAT] Pending recovery error: "
-                f"{error}"
+                "[HEARTBEAT] Pending recovery Redis "
+                f"error: {error}"
             )
-
-            return
+            return examined_total
 
         except Exception as error:
-
             print(
                 "[HEARTBEAT] Pending recovery "
-                f"unexpected error: {error}"
+                f"unexpected error: {type(error).__name__}: "
+                f"{error}"
             )
+            return examined_total
 
-            return
-
-        if not result:
-            return
-
-        next_start_id = result[0]
-
-        messages = result[1]
-
-        # ----------------------------------------------------
-        # Redis-py can return deleted-message metadata as a
-        # third element depending on Redis/server version.
-        # We intentionally ignore it.
-        # ----------------------------------------------------
-
-        if messages:
-
-            print(
-                "[HEARTBEAT] Recovering "
-                f"{len(messages)} pending message(s)"
+        next_start_id, messages = (
+            _parse_xautoclaim_result(
+                result
             )
+        )
 
         for message_id, fields in messages:
+            examined_total += 1
 
             try:
-
                 await process_message(
                     redis_client,
                     message_id,
@@ -2975,43 +1367,40 @@ async def recover_pending_messages(
                     recovered=True,
                 )
 
-                recovered_total += 1
-
             except asyncio.CancelledError:
                 raise
 
             except Exception as error:
-
                 print(
                     "[HEARTBEAT PENDING "
                     "ISOLATION ERROR] "
-                    f"{message_id}: {error}"
+                    f"message={message_id} "
+                    f"error={type(error).__name__}: "
+                    f"{error}"
                 )
 
         next_start_id = decode(
             next_start_id
         )
 
-        if next_start_id == "0-0":
+        if next_start_id in (
+            "0-0",
+            b"0-0",
+            None,
+        ):
             break
 
         start_id = str(
             next_start_id
         )
 
-    if recovered_total:
-
+    if examined_total:
         print(
-            "[HEARTBEAT] Recovered "
-            f"{recovered_total} pending message(s)"
+            "[HEARTBEAT] Examined "
+            f"{examined_total} pending heartbeat(s)"
         )
 
-    else:
-
-        print(
-            "[HEARTBEAT] "
-            "No stale pending messages recovered."
-        )
+    return examined_total
 
 
 # ============================================================
@@ -3020,9 +1409,12 @@ async def recover_pending_messages(
 
 async def consume_new_messages(
     redis_client: redis.Redis,
-) -> None:
+) -> int:
     """
     Consume newly delivered heartbeat messages.
+
+    Returns:
+        Number of messages received.
     """
 
     messages = await redis_client.xreadgroup(
@@ -3036,14 +1428,15 @@ async def consume_new_messages(
     )
 
     if not messages:
-        return
+        return 0
 
-    for _, stream_messages in messages:
+    processed_count = 0
+
+    for stream_name, stream_messages in messages:
+        _ = stream_name
 
         for message_id, fields in stream_messages:
-
             try:
-
                 await process_message(
                     redis_client,
                     message_id,
@@ -3051,16 +1444,21 @@ async def consume_new_messages(
                     recovered=False,
                 )
 
+                processed_count += 1
+
             except asyncio.CancelledError:
                 raise
 
             except Exception as error:
-
                 print(
                     "[HEARTBEAT MESSAGE "
                     "ISOLATION ERROR] "
-                    f"{message_id}: {error}"
+                    f"message={message_id} "
+                    f"error={type(error).__name__}: "
+                    f"{error}"
                 )
+
+    return processed_count
 
 
 # ============================================================
@@ -3071,21 +1469,19 @@ async def heartbeat_consumer_loop(
     redis_client: redis.Redis,
 ) -> None:
     """
-    Main heartbeat consumer.
+    Main heartbeat consumer lifecycle.
 
-    Lifecycle:
-
-        Redis
-          ↓
-        Consumer Group
-          ↓
-        Pending Recovery
-          ↓
-        New Heartbeats
-          ↓
-        AgentRegistry
-          ↓
-        Watchdog / Supervisor
+    Redis
+        ↓
+    Consumer Group
+        ↓
+    Pending Recovery
+        ↓
+    New Heartbeats
+        ↓
+    AgentRegistry
+        ↓
+    Watchdog / Supervisor
     """
 
     await ensure_consumer_group(
@@ -3093,16 +1489,28 @@ async def heartbeat_consumer_loop(
     )
 
     print(
-        "[HEARTBEAT] Consumer started: "
-        f"{STREAM_NAME}/{GROUP_NAME}"
+        "[HEARTBEAT] Consumer started | "
+        f"stream={STREAM_NAME} | "
+        f"group={GROUP_NAME} | "
+        f"consumer={CONSUMER_NAME}"
+    )
+
+    print(
+        "[HEARTBEAT] Configuration | "
+        f"timeout={HEARTBEAT_TIMEOUT}s | "
+        f"pending_idle={PENDING_IDLE_MS}ms | "
+        f"read_count={READ_COUNT}"
+    )
+
+    print(
+        "[HEARTBEAT] Ordering protection enabled"
     )
 
     # --------------------------------------------------------
-    # Initial pending recovery
+    # Initial recovery
     # --------------------------------------------------------
 
     try:
-
         await recover_pending_messages(
             redis_client
         )
@@ -3111,51 +1519,73 @@ async def heartbeat_consumer_loop(
         raise
 
     except Exception as error:
-
         print(
             "[HEARTBEAT] Initial pending recovery "
-            f"failed: {error}"
+            f"failed: {type(error).__name__}: {error}"
         )
 
     # --------------------------------------------------------
-    # Continuous consumption
+    # Continuous processing
     # --------------------------------------------------------
 
+    last_pending_recovery = (
+        asyncio.get_running_loop().time()
+    )
+
     while True:
-
         try:
-
             await consume_new_messages(
                 redis_client
             )
 
-        except asyncio.CancelledError:
+            now = (
+                asyncio.get_running_loop().time()
+            )
 
+            if (
+                now
+                - last_pending_recovery
+                >= PENDING_RECOVERY_INTERVAL
+            ):
+                await recover_pending_messages(
+                    redis_client
+                )
+
+                last_pending_recovery = now
+
+        except asyncio.CancelledError:
             print(
                 "[HEARTBEAT] Consumer cancellation "
                 "received."
             )
-
             raise
 
-        except Exception as error:
-
+        except (
+            redis.ConnectionError,
+            redis.TimeoutError,
+        ) as error:
             print(
-                "[HEARTBEAT CONSUMER ERROR] "
+                "[HEARTBEAT REDIS ERROR] "
+                f"{type(error).__name__}: "
                 f"{error}"
             )
 
-            # ------------------------------------------------
-            # Redis/network/application failure must not kill
-            # the heartbeat consumer permanently.
-            # ------------------------------------------------
+            await asyncio.sleep(
+                RETRY_DELAY
+            )
+
+        except Exception as error:
+            print(
+                "[HEARTBEAT CONSUMER ERROR] "
+                f"{type(error).__name__}: "
+                f"{error}"
+            )
 
             await asyncio.sleep(
                 RETRY_DELAY
             )
 
             try:
-
                 await recover_pending_messages(
                     redis_client
                 )
@@ -3164,10 +1594,11 @@ async def heartbeat_consumer_loop(
                 raise
 
             except Exception as recovery_error:
-
                 print(
-                    "[HEARTBEAT] Pending recovery retry "
-                    f"failed: {recovery_error}"
+                    "[HEARTBEAT] Recovery retry "
+                    f"failed: "
+                    f"{type(recovery_error).__name__}: "
+                    f"{recovery_error}"
                 )
 
 
@@ -3177,23 +1608,19 @@ async def heartbeat_consumer_loop(
 
 def create_redis_client() -> redis.Redis:
     """
-    Create the Redis client used by the standalone consumer.
+    Create the standalone async Redis client.
     """
 
     return redis.Redis(
         host=REDIS_HOST,
         port=REDIS_PORT,
         decode_responses=True,
-
-        # Prevent indefinite network hangs.
         socket_connect_timeout=(
             REDIS_SOCKET_CONNECT_TIMEOUT
         ),
-
         socket_timeout=(
             REDIS_SOCKET_TIMEOUT
         ),
-
         health_check_interval=30,
     )
 
@@ -3207,14 +1634,11 @@ async def main() -> None:
     Standalone heartbeat consumer entry point.
     """
 
-    redis_client = create_redis_client()
+    redis_client = (
+        create_redis_client()
+    )
 
     try:
-
-        # ----------------------------------------------------
-        # Verify Redis before entering the consumer loop.
-        # ----------------------------------------------------
-
         await redis_client.ping()
 
         print(
@@ -3226,7 +1650,6 @@ async def main() -> None:
         )
 
     finally:
-
         await redis_client.aclose()
 
 
@@ -3235,7 +1658,6 @@ async def main() -> None:
 # ============================================================
 
 if __name__ == "__main__":
-
     asyncio.run(
         main()
     )

@@ -1,4 +1,4 @@
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class PersonDetection(BaseModel):
@@ -25,7 +25,12 @@ class PersonDetectedData(BaseModel):
 
     frame_id: str = Field(min_length=1)
 
-    detections: list[PersonDetection]
+    detections: list[PersonDetection] = Field(default_factory=list)
+
+    @field_validator("frame_id", mode="before")
+    @classmethod
+    def normalize_frame_id(cls, value):
+        return str(value)
 
     frame_timestamp: str | None = None
     detection_count: int | None = None

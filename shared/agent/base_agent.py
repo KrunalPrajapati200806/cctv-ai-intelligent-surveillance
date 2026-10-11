@@ -1,292 +1,25 @@
-# import asyncio
-# import os
-# import socket
-# import uuid
-# from datetime import datetime, timezone
-# from typing import Optional
-
-# import redis.asyncio as redis
-
-# from shared.heartbeat.heartbeat import heartbeat_loop
-
-
-# class BaseAgent:
-#     """
-#     Common runtime for all CCTV AI agents.
-
-#     Responsibilities:
-#     - Agent identity
-#     - Redis connection
-#     - Heartbeats
-#     - Graceful startup/shutdown
-#     - Isolated error handling
-#     - Agent lifecycle logging
-
-#     AI-specific logic must be implemented by subclasses.
-#     """
-
-#     def __init__(
-#         self,
-#         agent_id: str,
-#         redis_host: Optional[str] = None,
-#         redis_port: Optional[int] = None,
-#         heartbeat_interval: Optional[int] = None,
-#     ):
-#         self.agent_id = agent_id
-
-#         self.redis_host = redis_host or os.getenv(
-#             "REDIS_HOST",
-#             "localhost",
-#         )
-
-#         self.redis_port = redis_port or int(
-#             os.getenv(
-#                 "REDIS_PORT",
-#                 "6379",
-#             )
-#         )
-
-#         self.heartbeat_interval = heartbeat_interval or int(
-#             os.getenv(
-#                 "HEARTBEAT_INTERVAL",
-#                 "10",
-#             )
-#         )
-
-#         self.redis_client: Optional[redis.Redis] = None
-#         self.heartbeat_task: Optional[asyncio.Task] = None
-
-#         self.running = False
-
-#         self.hostname = socket.gethostname()
-#         self.instance_id = str(uuid.uuid4())
-
-#     # ---------------------------------------------------------
-#     # Lifecycle
-#     # ---------------------------------------------------------
-
-#     async def start(self):
-#         """
-#         Start common agent infrastructure.
-#         """
-
-#         print("=" * 60)
-#         print(f"STARTING AGENT: {self.agent_id}")
-#         print(f"HOST: {self.hostname}")
-#         print(f"INSTANCE: {self.instance_id}")
-#         print(
-#             f"REDIS: {self.redis_host}:{self.redis_port}"
-#         )
-#         print("=" * 60)
-
-#         self.redis_client = redis.Redis(
-#             host=self.redis_host,
-#             port=self.redis_port,
-#             decode_responses=True,
-#             socket_timeout=None,
-#             health_check_interval=30,
-#         )
-
-#         # Verify Redis connection.
-#         await self.redis_client.ping()
-
-#         print(
-#             f"[{self.agent_id}] Redis connection established."
-#         )
-
-#         self.running = True
-
-#         # Start heartbeat independently from AI processing.
-#         self.heartbeat_task = asyncio.create_task(
-#             heartbeat_loop(
-#                 redis_client=self.redis_client,
-#                 agent_id=self.agent_id,
-#                 interval=self.heartbeat_interval,
-#             )
-#         )
-
-#         print(
-#             f"[{self.agent_id}] Heartbeat started "
-#             f"(interval={self.heartbeat_interval}s)"
-#         )
-
-#         await self.on_start()
-
-#     async def stop(self):
-#         """
-#         Gracefully stop the agent.
-#         """
-
-#         if not self.running:
-#             return
-
-#         print(
-#             f"[{self.agent_id}] Shutting down..."
-#         )
-
-#         self.running = False
-
-#         # Stop heartbeat.
-#         if self.heartbeat_task:
-#             self.heartbeat_task.cancel()
-
-#             try:
-#                 await self.heartbeat_task
-#             except asyncio.CancelledError:
-#                 pass
-
-#             self.heartbeat_task = None
-
-#         # Allow subclass cleanup.
-#         try:
-#             await self.on_stop()
-#         except Exception as error:
-#             print(
-#                 f"[{self.agent_id}] "
-#                 f"Shutdown cleanup error: {error}"
-#             )
-
-#         # Close Redis.
-#         if self.redis_client:
-#             try:
-#                 await self.redis_client.aclose()
-#             except Exception as error:
-#                 print(
-#                     f"[{self.agent_id}] "
-#                     f"Redis close error: {error}"
-#                 )
-
-#             self.redis_client = None
-
-#         print(
-#             f"[{self.agent_id}] Stopped."
-#         )
-
-#     # ---------------------------------------------------------
-#     # Hooks
-#     # ---------------------------------------------------------
-
-#     async def on_start(self):
-#         """
-#         Optional startup hook for subclasses.
-#         """
-#         pass
-
-#     async def on_stop(self):
-#         """
-#         Optional shutdown hook for subclasses.
-#         """
-#         pass
-
-#     # ---------------------------------------------------------
-#     # Main agent logic
-#     # ---------------------------------------------------------
-
-#     async def run(self):
-#         """
-#         Main runtime.
-
-#         Subclasses must implement this method.
-#         """
-
-#         raise NotImplementedError(
-#             "Agent must implement run()."
-#         )
-
-#     async def run_forever(self):
-#         """
-#         Complete agent lifecycle.
-
-#         A failure in this agent is contained here and does
-#         not directly terminate other agents.
-#         """
-
-#         try:
-#             await self.start()
-
-#             await self.run()
-
-#         except asyncio.CancelledError:
-#             print(
-#                 f"[{self.agent_id}] "
-#                 f"Cancellation received."
-#             )
-#             raise
-
-#         except Exception as error:
-#             print(
-#                 f"[{self.agent_id}] "
-#                 f"FATAL AGENT ERROR: {error}"
-#             )
-
-#         finally:
-#             await self.stop()
-
-#     # ---------------------------------------------------------
-#     # Utility
-#     # ---------------------------------------------------------
-
-#     def now(self) -> str:
-#         """
-#         Return UTC timestamp.
-#         """
-
-#         return datetime.now(
-#             timezone.utc
-#         ).isoformat()
-
-#     async def publish(
-#         self,
-#         stream: str,
-#         event: dict,
-#     ) -> str:
-#         """
-#         Publish an event to a Redis Stream.
-#         """
-
-#         if not self.redis_client:
-#             raise RuntimeError(
-#                 "Redis client is not initialized."
-#             )
-
-#         redis_id = await self.redis_client.xadd(
-#             stream,
-#             {
-#                 "event": __import__("json").dumps(
-#                     event
-#                 )
-#             },
-#         )
-
-#         return redis_id
-
-#     async def sleep(self, seconds: float):
-#         """
-#         Cooperative async sleep.
-#         """
-
-#         await asyncio.sleep(seconds)
-
-
-
-
-
 """
 Base class for all CCTV AI agents.
 
-Responsibilities:
+Responsibilities
+----------------
 - agent identity
 - process instance identity
+- supervisor process generation
 - hostname
 - Redis lifecycle
+- agent-registry registration
 - heartbeat lifecycle
 - graceful shutdown
 - common event publishing
 - common timing helpers
 
 Agents should implement:
+
     on_start()
+
     on_stop()
+
     run()
 """
 
@@ -295,13 +28,13 @@ from __future__ import annotations
 import asyncio
 import os
 import socket
-import sys
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
 
 import redis.asyncio as redis
 
+from backend.app.monitoring.agent_registry import agent_registry
 from shared.heartbeat.heartbeat import heartbeat_loop
 from shared.schemas.event_schema import BaseEvent
 
@@ -309,6 +42,22 @@ from shared.schemas.event_schema import BaseEvent
 class BaseAgent:
     """
     Common lifecycle foundation for every CCTV AI agent.
+
+    Each process gets:
+
+        agent_id
+        instance_id
+        process_generation
+        hostname
+
+    The instance_id uniquely identifies the actual running process.
+
+    The process generation is supplied by the external supervisor through:
+
+        AGENT_PROCESS_GENERATION
+
+    The registry uses instance_id to reject heartbeats from an older
+    process instance.
     """
 
     # ========================================================
@@ -331,19 +80,58 @@ class BaseAgent:
 
         self.agent_id = agent_id.strip()
 
-        # A new UUID identifies this exact process instance.
+        # ----------------------------------------------------
+        # Supervisor process generation
+        # ----------------------------------------------------
+
+        raw_generation = os.getenv(
+            "AGENT_PROCESS_GENERATION",
+            "0",
+        ).strip()
+
+        try:
+            self.process_generation = int(
+                raw_generation
+            )
+        except ValueError:
+            self.process_generation = 0
+
+        if self.process_generation < 0:
+            self.process_generation = 0
+
+        # ----------------------------------------------------
+        # Unique process instance
+        # ----------------------------------------------------
+        #
+        # The UUID guarantees that every actual process
+        # instance gets a different identity.
+        #
+        # Including the supervisor generation makes debugging
+        # and lifecycle tracing much easier.
         #
         # Example:
         #
-        # tracker-01
-        #   instance A → process restart
-        #   instance B → new UUID
+        # tracker-CAM01-g12-8c2c...
         #
-        self.instance_id = str(
-            uuid.uuid4()
+        # Process restart:
+        #
+        # tracker-CAM01-g13-a19f...
+        #
+        # The registry will therefore reject heartbeats from
+        # the previous instance.
+        # ----------------------------------------------------
+
+        self.instance_id = (
+            f"{self.agent_id}"
+            f"-g{self.process_generation}"
+            f"-{uuid.uuid4().hex}"
         )
 
         self.hostname = socket.gethostname()
+
+        # ----------------------------------------------------
+        # Redis configuration
+        # ----------------------------------------------------
 
         self.redis_host = (
             redis_host
@@ -354,27 +142,45 @@ class BaseAgent:
             )
         )
 
-        self.redis_port = (
-            redis_port
-            if redis_port is not None
-            else int(
-                os.getenv(
-                    "REDIS_PORT",
-                    "6379",
-                )
+        if redis_port is not None:
+            self.redis_port = redis_port
+        else:
+            raw_port = os.getenv(
+                "REDIS_PORT",
+                "6379",
             )
-        )
 
-        self.heartbeat_interval = (
-            heartbeat_interval
-            if heartbeat_interval is not None
-            else int(
-                os.getenv(
-                    "HEARTBEAT_INTERVAL",
-                    "10",
+            try:
+                self.redis_port = int(
+                    raw_port
                 )
+            except (TypeError, ValueError) as error:
+                raise ValueError(
+                    "REDIS_PORT must be a valid integer."
+                ) from error
+
+        # ----------------------------------------------------
+        # Heartbeat configuration
+        # ----------------------------------------------------
+
+        if heartbeat_interval is not None:
+            self.heartbeat_interval = (
+                heartbeat_interval
             )
-        )
+        else:
+            raw_interval = os.getenv(
+                "HEARTBEAT_INTERVAL",
+                "10",
+            )
+
+            try:
+                self.heartbeat_interval = int(
+                    raw_interval
+                )
+            except (TypeError, ValueError) as error:
+                raise ValueError(
+                    "HEARTBEAT_INTERVAL must be a valid integer."
+                ) from error
 
         if self.redis_port <= 0:
             raise ValueError(
@@ -385,6 +191,10 @@ class BaseAgent:
             raise ValueError(
                 "heartbeat_interval must be greater than zero."
             )
+
+        # ----------------------------------------------------
+        # Runtime state
+        # ----------------------------------------------------
 
         self.redis_client: Optional[
             redis.Redis
@@ -409,8 +219,13 @@ class BaseAgent:
         1. Create Redis connection.
         2. Verify Redis.
         3. Mark agent running.
-        4. Start heartbeat.
-        5. Run subclass startup hook.
+        4. Register this exact process instance.
+        5. Start heartbeat.
+        6. Run subclass startup hook.
+
+        Registration happens before the heartbeat task starts so
+        the registry has an explicit process identity before any
+        heartbeat can be accepted.
         """
 
         if self.running:
@@ -424,6 +239,11 @@ class BaseAgent:
         print(
             f"[AGENT] instance_id="
             f"{self.instance_id}"
+        )
+
+        print(
+            f"[AGENT] process_generation="
+            f"{self.process_generation}"
         )
 
         print(
@@ -445,12 +265,8 @@ class BaseAgent:
                 host=self.redis_host,
                 port=self.redis_port,
                 decode_responses=True,
-
                 socket_connect_timeout=5,
-
-                # Keep command timeouts bounded.
                 socket_timeout=10,
-
                 health_check_interval=30,
             )
 
@@ -458,19 +274,50 @@ class BaseAgent:
 
             self.redis_client = client
 
+            # ------------------------------------------------
+            # Mark running only after Redis is reachable.
+            # ------------------------------------------------
+
             self.running = True
+
+            # ------------------------------------------------
+            # Register exact process instance
+            # ------------------------------------------------
+
+            agent_registry.register_agent(
+                agent_id=self.agent_id,
+                instance_id=self.instance_id,
+                hostname=self.hostname,
+            )
+
+            print(
+                "[AGENT] Registered process instance: "
+                f"agent_id={self.agent_id}, "
+                f"instance_id={self.instance_id}, "
+                f"generation={self.process_generation}"
+            )
 
             # ------------------------------------------------
             # Heartbeat
             # ------------------------------------------------
+            #
+            # heartbeat_loop receives the same instance_id
+            # registered above.
+            # ------------------------------------------------
 
-            self.heartbeat_task = asyncio.create_task(
-                heartbeat_loop(
-                    self.redis_client,
-                    agent_id=self.agent_id,
-                    instance_id=self.instance_id,
-                    hostname=self.hostname,
-                    interval=self.heartbeat_interval,
+            self.heartbeat_task = (
+                asyncio.create_task(
+                    heartbeat_loop(
+                        self.redis_client,
+                        agent_id=self.agent_id,
+                        instance_id=self.instance_id,
+                        hostname=self.hostname,
+                        interval=self.heartbeat_interval,
+                    ),
+                    name=(
+                        f"heartbeat-"
+                        f"{self.agent_id}"
+                    ),
                 )
             )
 
@@ -482,38 +329,94 @@ class BaseAgent:
 
             print(
                 f"[AGENT] Started "
-                f"{self.agent_id}"
+                f"{self.agent_id} "
+                f"(generation="
+                f"{self.process_generation})"
             )
+
+        except asyncio.CancelledError:
+
+            self.running = False
+
+            await self._cleanup_start_failure()
+
+            raise
 
         except Exception:
 
             self.running = False
 
-            # If startup fails before normal lifecycle
-            # cleanup becomes available, close Redis here.
-            if self.heartbeat_task is not None:
-
-                self.heartbeat_task.cancel()
-
-                try:
-                    await self.heartbeat_task
-                except asyncio.CancelledError:
-                    pass
-                except Exception:
-                    pass
-
-                self.heartbeat_task = None
-
-            if client is not None:
-
-                try:
-                    await client.aclose()
-                except Exception:
-                    pass
-
-            self.redis_client = None
+            await self._cleanup_start_failure()
 
             raise
+
+    # ========================================================
+    # START FAILURE CLEANUP
+    # ========================================================
+
+    async def _cleanup_start_failure(self) -> None:
+        """
+        Cleanup resources when startup fails.
+
+        This method is intentionally isolated from normal stop()
+        so partial startup failures do not accidentally execute
+        subclass shutdown logic that assumes successful startup.
+        """
+
+        # ----------------------------------------------------
+        # Heartbeat
+        # ----------------------------------------------------
+
+        heartbeat_task = (
+            self.heartbeat_task
+        )
+
+        self.heartbeat_task = None
+
+        if heartbeat_task is not None:
+
+            if not heartbeat_task.done():
+
+                heartbeat_task.cancel()
+
+            try:
+
+                await heartbeat_task
+
+            except asyncio.CancelledError:
+                pass
+
+            except Exception as error:
+
+                print(
+                    "[AGENT] Heartbeat startup "
+                    f"cleanup error for "
+                    f"{self.agent_id}: "
+                    f"{error}"
+                )
+
+        # ----------------------------------------------------
+        # Redis
+        # ----------------------------------------------------
+
+        client = self.redis_client
+
+        self.redis_client = None
+
+        if client is not None:
+
+            try:
+
+                await client.aclose()
+
+            except Exception as error:
+
+                print(
+                    "[AGENT] Redis startup "
+                    f"cleanup error for "
+                    f"{self.agent_id}: "
+                    f"{error}"
+                )
 
     # ========================================================
     # STOP
@@ -535,6 +438,10 @@ class BaseAgent:
             f"{self.agent_id}"
         )
 
+        # ----------------------------------------------------
+        # Stop accepting normal lifecycle work.
+        # ----------------------------------------------------
+
         self.running = False
 
         # ----------------------------------------------------
@@ -549,18 +456,23 @@ class BaseAgent:
 
         if heartbeat_task is not None:
 
-            heartbeat_task.cancel()
+            if not heartbeat_task.done():
+
+                heartbeat_task.cancel()
 
             try:
+
                 await heartbeat_task
 
             except asyncio.CancelledError:
                 pass
 
             except Exception as error:
+
                 print(
-                    f"[AGENT] Heartbeat cleanup "
-                    f"error for {self.agent_id}: "
+                    "[AGENT] Heartbeat cleanup "
+                    f"error for "
+                    f"{self.agent_id}: "
                     f"{error}"
                 )
 
@@ -569,13 +481,19 @@ class BaseAgent:
         # ----------------------------------------------------
 
         try:
+
             await self.on_stop()
+
+        except asyncio.CancelledError:
+
+            raise
 
         except Exception as error:
 
             print(
-                f"[AGENT] on_stop failed for "
-                f"{self.agent_id}: {error}"
+                "[AGENT] on_stop failed for "
+                f"{self.agent_id}: "
+                f"{error}"
             )
 
         # ----------------------------------------------------
@@ -583,18 +501,21 @@ class BaseAgent:
         # ----------------------------------------------------
 
         client = self.redis_client
+
         self.redis_client = None
 
         if client is not None:
 
             try:
+
                 await client.aclose()
 
             except Exception as error:
 
                 print(
-                    f"[AGENT] Redis cleanup "
-                    f"error for {self.agent_id}: "
+                    "[AGENT] Redis cleanup "
+                    f"error for "
+                    f"{self.agent_id}: "
                     f"{error}"
                 )
 
@@ -641,9 +562,9 @@ class BaseAgent:
         """
         Full agent lifecycle.
 
-        Fatal errors are re-raised after cleanup so the
-        external supervisor can observe a non-zero process
-        failure and perform recovery.
+        Fatal errors are re-raised after cleanup so the external
+        supervisor can observe a non-zero process failure and
+        perform recovery.
         """
 
         startup_succeeded = False
@@ -664,7 +585,8 @@ class BaseAgent:
 
             print(
                 f"[AGENT] Fatal error in "
-                f"{self.agent_id}: {error}"
+                f"{self.agent_id}: "
+                f"{error}"
             )
 
             raise
@@ -672,7 +594,12 @@ class BaseAgent:
         finally:
 
             try:
+
                 await self.stop()
+
+            except asyncio.CancelledError:
+
+                raise
 
             except Exception as cleanup_error:
 
@@ -682,8 +609,8 @@ class BaseAgent:
                     f"{cleanup_error}"
                 )
 
-            # This variable intentionally exists to make the
-            # lifecycle state explicit for future extensions.
+            # Explicit lifecycle marker retained for
+            # future extensions.
             _ = startup_succeeded
 
     # ========================================================
@@ -702,33 +629,44 @@ class BaseAgent:
         """
 
         if not stream or not stream.strip():
+
             raise ValueError(
                 "stream must not be empty."
             )
 
         if self.redis_client is None:
+
             raise RuntimeError(
                 f"Redis client is unavailable "
                 f"for {self.agent_id}"
             )
 
         if isinstance(event, BaseEvent):
+
             payload = event.to_dict()
 
         elif isinstance(event, dict):
+
             payload = event
 
         else:
+
             raise TypeError(
                 "event must be BaseEvent or dict."
             )
 
+        validated_event = (
+            BaseEvent.model_validate(
+                payload
+            )
+        )
+
         return await self.redis_client.xadd(
             stream,
             {
-                "event": BaseEvent.model_validate(
-                    payload
-                ).to_json()
+                "event": (
+                    validated_event.to_json()
+                )
             },
         )
 
@@ -759,6 +697,7 @@ class BaseAgent:
         """
 
         if seconds < 0:
+
             raise ValueError(
                 "seconds cannot be negative."
             )

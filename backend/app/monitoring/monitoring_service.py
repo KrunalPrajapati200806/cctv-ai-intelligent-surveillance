@@ -1,1322 +1,3 @@
-# # # import asyncio
-
-# # # from backend.app.monitoring.heartbeat_consumer import (
-# # #     heartbeat_consumer_loop,
-# # # )
-# # # from backend.app.monitoring.supervisor import (
-# # #     AgentSupervisor,
-# # # )
-# # # from backend.app.monitoring.watchdog import (
-# # #     watchdog_loop,
-# # # )
-
-# # # from backend.app.messaging.redis_client import (
-# # #     redis_client,
-# # # )
-
-
-# # # # ============================================================
-# # # # MONITORING SERVICE
-# # # # ============================================================
-
-# # # class MonitoringService:
-# # #     """
-# # #     Unified CCTV monitoring/control service.
-
-# # #     Responsibilities
-# # #     ----------------
-# # #     1. Consume agent heartbeats.
-# # #     2. Maintain the shared AgentRegistry.
-# # #     3. Detect dead agents through the Watchdog.
-# # #     4. Supervise agent subprocesses.
-# # #     5. Restart failed/unresponsive agents.
-# # #     6. Keep every agent failure isolated.
-
-# # #     Architecture
-# # #     ------------
-# # #         Redis
-# # #           │
-# # #           ▼
-# # #     Heartbeat Consumer
-# # #           │
-# # #           ▼
-# # #     Agent Registry
-# # #           │
-# # #           ├──────────────► Watchdog
-# # #           │                    │
-# # #           │                    ▼
-# # #           │                 DEAD
-# # #           │                    │
-# # #           │                    ▼
-# # #           └──────────────► Supervisor
-# # #                                │
-# # #                                ▼
-# # #                         Restart ONLY that agent
-# # #     """
-
-# # #     def __init__(self):
-# # #         self.supervisor = AgentSupervisor()
-
-# # #         self.running = False
-
-# # #         self.heartbeat_task = None
-# # #         self.watchdog_task = None
-# # #         self.supervisor_task = None
-
-# # #     # ========================================================
-# # #     # START
-# # #     # ========================================================
-
-# # #     async def start(self):
-# # #         print("=" * 80)
-# # #         print("CCTV AI MONITORING SERVICE")
-# # #         print("=" * 80)
-
-# # #         print("[MONITORING] Starting unified monitoring service...")
-
-# # #         self.running = True
-
-# # #         # ----------------------------------------------------
-# # #         # Redis connection
-# # #         # ----------------------------------------------------
-
-# # #         try:
-# # #             await redis_client.ping()
-
-# # #             print(
-# # #                 "[MONITORING] Redis connection established."
-# # #             )
-
-# # #         except Exception as error:
-
-# # #             print(
-# # #                 "[MONITORING] FATAL: "
-# # #                 f"Redis connection failed: {error}"
-# # #             )
-
-# # #             self.running = False
-
-# # #             raise
-
-# # #         # ----------------------------------------------------
-# # #         # Start Supervisor
-# # #         # ----------------------------------------------------
-
-# # #         try:
-
-# # #             await self.supervisor.start_all()
-
-# # #         except Exception as error:
-
-# # #             print(
-# # #                 "[MONITORING] "
-# # #                 f"Supervisor startup error: {error}"
-# # #             )
-
-# # #             # Do not terminate monitoring service because
-# # #             # one startup operation failed.
-
-# # #         # ----------------------------------------------------
-# # #         # Heartbeat Consumer
-# # #         # ----------------------------------------------------
-
-# # #         self.heartbeat_task = asyncio.create_task(
-# # #             self._run_heartbeat_consumer()
-# # #         )
-
-# # #         print(
-# # #             "[MONITORING] "
-# # #             "Heartbeat consumer started."
-# # #         )
-
-# # #         # ----------------------------------------------------
-# # #         # Watchdog
-# # #         # ----------------------------------------------------
-
-# # #         self.watchdog_task = asyncio.create_task(
-# # #             self._run_watchdog()
-# # #         )
-
-# # #         print(
-# # #             "[MONITORING] "
-# # #             "Watchdog started."
-# # #         )
-
-# # #         # ----------------------------------------------------
-# # #         # Supervisor health monitoring
-# # #         # ----------------------------------------------------
-
-# # #         self.supervisor_task = asyncio.create_task(
-# # #             self._run_supervisor_health()
-# # #         )
-
-# # #         print(
-# # #             "[MONITORING] "
-# # #             "Supervisor health monitoring started."
-# # #         )
-
-# # #         print("=" * 80)
-# # #         print("[MONITORING] SERVICE READY")
-# # #         print("=" * 80)
-
-# # #     # ========================================================
-# # #     # HEARTBEAT CONSUMER
-# # #     # ========================================================
-
-# # #     async def _run_heartbeat_consumer(self):
-# # #         """
-# # #         Run heartbeat consumer independently.
-
-# # #         If the heartbeat consumer encounters an unexpected
-# # #         failure, it is restarted without affecting agents.
-# # #         """
-
-# # #         while self.running:
-
-# # #             try:
-
-# # #                 await heartbeat_consumer_loop(
-# # #                     redis_client
-# # #                 )
-
-# # #             except asyncio.CancelledError:
-
-# # #                 raise
-
-# # #             except Exception as error:
-
-# # #                 print(
-# # #                     "[MONITORING] "
-# # #                     f"Heartbeat consumer crashed: {error}"
-# # #                 )
-
-# # #                 print(
-# # #                     "[MONITORING] "
-# # #                     "Restarting heartbeat consumer..."
-# # #                 )
-
-# # #                 await asyncio.sleep(2)
-
-# # #     # ========================================================
-# # #     # WATCHDOG
-# # #     # ========================================================
-
-# # #     async def _run_watchdog(self):
-# # #         """
-# # #         Run watchdog against the SAME in-memory AgentRegistry
-# # #         used by the Supervisor.
-
-# # #         Watchdog only detects and marks agents DEAD.
-
-# # #         It does NOT restart processes.
-# # #         """
-
-# # #         while self.running:
-
-# # #             try:
-
-# # #                 await watchdog_loop()
-
-# # #             except asyncio.CancelledError:
-
-# # #                 raise
-
-# # #             except Exception as error:
-
-# # #                 print(
-# # #                     "[MONITORING] "
-# # #                     f"Watchdog crashed: {error}"
-# # #                 )
-
-# # #                 print(
-# # #                     "[MONITORING] "
-# # #                     "Restarting watchdog..."
-# # #                 )
-
-# # #                 await asyncio.sleep(2)
-
-# # #     # ========================================================
-# # #     # SUPERVISOR HEALTH MONITOR
-# # #     # ========================================================
-
-# # #     async def _run_supervisor_health(self):
-# # #         """
-# # #         Supervisor owns recovery.
-
-# # #         Individual SupervisedAgent.health_loop() instances
-# # #         inspect AgentRegistry and recover only their own agent.
-# # #         """
-
-# # #         while self.running:
-
-# # #             try:
-
-# # #                 # The individual agent health loops were already
-# # #                 # created by supervisor.start_all().
-# # #                 #
-# # #                 # This task simply keeps the unified monitoring
-# # #                 # service alive and provides a central supervisor
-# # #                 # health boundary.
-
-# # #                 await asyncio.sleep(5)
-
-# # #             except asyncio.CancelledError:
-
-# # #                 raise
-
-# # #             except Exception as error:
-
-# # #                 print(
-# # #                     "[MONITORING] "
-# # #                     f"Supervisor health boundary error: {error}"
-# # #                 )
-
-# # #                 await asyncio.sleep(2)
-
-# # #     # ========================================================
-# # #     # WAIT
-# # #     # ========================================================
-
-# # #     async def wait_forever(self):
-# # #         """
-# # #         Keep the monitoring service alive.
-# # #         """
-
-# # #         while self.running:
-
-# # #             await asyncio.sleep(1)
-
-# # #     # ========================================================
-# # #     # STOP
-# # #     # ========================================================
-
-# # #     async def stop(self):
-# # #         """
-# # #         Gracefully shut down the entire monitoring service.
-# # #         """
-
-# # #         if not self.running:
-# # #             return
-
-# # #         print("=" * 80)
-# # #         print("[MONITORING] Shutdown requested.")
-# # #         print("=" * 80)
-
-# # #         self.running = False
-
-# # #         # ----------------------------------------------------
-# # #         # Cancel heartbeat consumer
-# # #         # ----------------------------------------------------
-
-# # #         if self.heartbeat_task:
-
-# # #             self.heartbeat_task.cancel()
-
-# # #         # ----------------------------------------------------
-# # #         # Cancel watchdog
-# # #         # ----------------------------------------------------
-
-# # #         if self.watchdog_task:
-
-# # #             self.watchdog_task.cancel()
-
-# # #         # ----------------------------------------------------
-# # #         # Cancel supervisor health boundary
-# # #         # ----------------------------------------------------
-
-# # #         if self.supervisor_task:
-
-# # #             self.supervisor_task.cancel()
-
-# # #         # ----------------------------------------------------
-# # #         # Wait for monitoring tasks
-# # #         # ----------------------------------------------------
-
-# # #         tasks = [
-# # #             task
-# # #             for task in (
-# # #                 self.heartbeat_task,
-# # #                 self.watchdog_task,
-# # #                 self.supervisor_task,
-# # #             )
-# # #             if task is not None
-# # #         ]
-
-# # #         if tasks:
-
-# # #             await asyncio.gather(
-# # #                 *tasks,
-# # #                 return_exceptions=True,
-# # #             )
-
-# # #         self.heartbeat_task = None
-# # #         self.watchdog_task = None
-# # #         self.supervisor_task = None
-
-# # #         # ----------------------------------------------------
-# # #         # Stop all supervised agents
-# # #         # ----------------------------------------------------
-
-# # #         try:
-
-# # #             await self.supervisor.stop_all()
-
-# # #         except Exception as error:
-
-# # #             print(
-# # #                 "[MONITORING] "
-# # #                 f"Supervisor shutdown error: {error}"
-# # #             )
-
-# # #         # ----------------------------------------------------
-# # #         # Close Redis
-# # #         # ----------------------------------------------------
-
-# # #         try:
-
-# # #             await redis_client.aclose()
-
-# # #         except Exception as error:
-
-# # #             print(
-# # #                 "[MONITORING] "
-# # #                 f"Redis shutdown error: {error}"
-# # #             )
-
-# # #         print("=" * 80)
-# # #         print("[MONITORING] SERVICE STOPPED")
-# # #         print("=" * 80)
-
-
-# # # # ============================================================
-# # # # MAIN
-# # # # ============================================================
-
-# # # async def main():
-
-# # #     service = MonitoringService()
-
-# # #     try:
-
-# # #         await service.start()
-
-# # #         await service.wait_forever()
-
-# # #     except asyncio.CancelledError:
-
-# # #         raise
-
-# # #     except KeyboardInterrupt:
-
-# # #         print(
-# # #             "\n[MONITORING] "
-# # #             "Keyboard interrupt received."
-# # #         )
-
-# # #     finally:
-
-# # #         await service.stop()
-
-
-# # # # ============================================================
-# # # # ENTRY POINT
-# # # # ============================================================
-
-# # # if __name__ == "__main__":
-
-# # #     try:
-
-# # #         asyncio.run(main())
-
-# # #     except KeyboardInterrupt:
-
-# # #         print(
-# # #             "\n[MONITORING] "
-# # #             "Stopped by operator."
-# # #         )
-
-
-
-
-
-
-
-
-
-
-
-
-
-# # import asyncio
-
-# # from backend.app.messaging.redis_client import redis_client
-# # from backend.app.monitoring.heartbeat_consumer import (
-# #     heartbeat_consumer_loop,
-# # )
-# # from backend.app.monitoring.supervisor import AgentSupervisor
-# # from backend.app.monitoring.watchdog import watchdog_loop
-
-
-# # # ============================================================
-# # # MONITORING SERVICE
-# # # ============================================================
-
-# # class MonitoringService:
-# #     """
-# #     Unified CCTV monitoring/control service.
-
-# #     Responsibilities
-# #     ----------------
-# #     1. Consume agent heartbeats.
-# #     2. Maintain the shared AgentRegistry.
-# #     3. Detect dead agents through the Watchdog.
-# #     4. Supervise agent subprocesses.
-# #     5. Restart failed/unresponsive agents.
-# #     6. Keep every agent failure isolated.
-
-# #     Architecture
-# #     ------------
-
-# #         Agent Processes
-# #               │
-# #               │ heartbeat
-# #               ▼
-# #         Redis: events.system
-# #               │
-# #               ▼
-# #        Heartbeat Consumer
-# #               │
-# #               ▼
-# #         Shared AgentRegistry
-# #               │
-# #               ▼
-# #            Watchdog
-# #               │
-# #               │ mark DEAD
-# #               ▼
-# #         Agent Supervisor
-# #               │
-# #               ▼
-# #       Restart ONLY that agent
-
-# #     Important
-# #     ---------
-# #     MonitoringService is the coordinator.
-
-# #     AgentSupervisor is the ONLY restart authority.
-
-# #     Watchdog only detects failures and marks agents DEAD.
-
-# #     HeartbeatConsumer only updates AgentRegistry.
-
-# #     Individual SupervisedAgent health loops inside the
-# #     AgentSupervisor handle recovery of their own agents.
-# #     """
-
-# #     def __init__(self):
-# #         self.supervisor = AgentSupervisor()
-
-# #         self.running = False
-
-# #         self.heartbeat_task: asyncio.Task | None = None
-# #         self.watchdog_task: asyncio.Task | None = None
-
-# #     # ========================================================
-# #     # START
-# #     # ========================================================
-
-# #     async def start(self):
-# #         """
-# #         Start the complete monitoring stack.
-
-# #         Startup order:
-
-# #         1. Redis
-# #         2. Agent Supervisor
-# #         3. Heartbeat Consumer
-# #         4. Watchdog
-# #         """
-
-# #         print("=" * 80)
-# #         print("CCTV AI MONITORING SERVICE")
-# #         print("=" * 80)
-
-# #         print("[MONITORING] Starting unified monitoring service...")
-
-# #         self.running = True
-
-# #         # ----------------------------------------------------
-# #         # Redis connection
-# #         # ----------------------------------------------------
-
-# #         try:
-# #             await redis_client.ping()
-
-# #             print(
-# #                 "[MONITORING] Redis connection established."
-# #             )
-
-# #         except Exception as error:
-# #             print(
-# #                 "[MONITORING] FATAL: "
-# #                 f"Redis connection failed: {error}"
-# #             )
-
-# #             self.running = False
-# #             raise
-
-# #         # ----------------------------------------------------
-# #         # Start Supervisor
-# #         # ----------------------------------------------------
-
-# #         try:
-# #             await self.supervisor.start_all()
-
-# #         except Exception as error:
-# #             print(
-# #                 "[MONITORING] "
-# #                 f"Supervisor startup error: {error}"
-# #             )
-
-# #             # IMPORTANT:
-# #             # Monitoring service remains alive.
-# #             #
-# #             # AgentSupervisor isolates individual startup
-# #             # failures, so one failed agent must not terminate
-# #             # the monitoring service.
-
-# #         # ----------------------------------------------------
-# #         # Start Heartbeat Consumer
-# #         # ----------------------------------------------------
-
-# #         self.heartbeat_task = asyncio.create_task(
-# #             self._run_heartbeat_consumer(),
-# #             name="monitoring-heartbeat-consumer",
-# #         )
-
-# #         print(
-# #             "[MONITORING] "
-# #             "Heartbeat consumer started."
-# #         )
-
-# #         # ----------------------------------------------------
-# #         # Start Watchdog
-# #         # ----------------------------------------------------
-
-# #         self.watchdog_task = asyncio.create_task(
-# #             self._run_watchdog(),
-# #             name="monitoring-watchdog",
-# #         )
-
-# #         print(
-# #             "[MONITORING] "
-# #             "Watchdog started."
-# #         )
-
-# #         # ----------------------------------------------------
-# #         # Service ready
-# #         # ----------------------------------------------------
-
-# #         print("=" * 80)
-# #         print("[MONITORING] SERVICE READY")
-# #         print("=" * 80)
-
-# #     # ========================================================
-# #     # HEARTBEAT CONSUMER
-# #     # ========================================================
-
-# #     async def _run_heartbeat_consumer(self):
-# #         """
-# #         Run heartbeat consumer independently.
-
-# #         If the heartbeat consumer itself crashes unexpectedly,
-# #         restart only the heartbeat consumer.
-
-# #         Agent processes are NOT affected.
-# #         """
-
-# #         while self.running:
-
-# #             try:
-# #                 await heartbeat_consumer_loop(
-# #                     redis_client
-# #                 )
-
-# #             except asyncio.CancelledError:
-# #                 raise
-
-# #             except Exception as error:
-
-# #                 print(
-# #                     "[MONITORING] "
-# #                     f"Heartbeat consumer crashed: {error}"
-# #                 )
-
-# #                 if not self.running:
-# #                     break
-
-# #                 print(
-# #                     "[MONITORING] "
-# #                     "Restarting heartbeat consumer..."
-# #                 )
-
-# #                 await asyncio.sleep(2)
-
-# #     # ========================================================
-# #     # WATCHDOG
-# #     # ========================================================
-
-# #     async def _run_watchdog(self):
-# #         """
-# #         Run watchdog independently.
-
-# #         Watchdog:
-
-# #         - checks AgentRegistry
-# #         - detects heartbeat timeout
-# #         - marks agent DEAD
-
-# #         Watchdog does NOT restart agents.
-
-# #         AgentSupervisor remains the single restart authority.
-# #         """
-
-# #         while self.running:
-
-# #             try:
-# #                 await watchdog_loop()
-
-# #             except asyncio.CancelledError:
-# #                 raise
-
-# #             except Exception as error:
-
-# #                 print(
-# #                     "[MONITORING] "
-# #                     f"Watchdog crashed: {error}"
-# #                 )
-
-# #                 if not self.running:
-# #                     break
-
-# #                 print(
-# #                     "[MONITORING] "
-# #                     "Restarting watchdog..."
-# #                 )
-
-# #                 await asyncio.sleep(2)
-
-# #     # ========================================================
-# #     # WAIT
-# #     # ========================================================
-
-# #     async def wait_forever(self):
-# #         """
-# #         Keep the monitoring service alive.
-# #         """
-
-# #         while self.running:
-# #             await asyncio.sleep(1)
-
-# #     # ========================================================
-# #     # STOP
-# #     # ========================================================
-
-# #     async def stop(self):
-# #         """
-# #         Gracefully shut down the complete monitoring service.
-
-# #         Shutdown order:
-
-# #         1. Stop accepting monitoring work.
-# #         2. Cancel heartbeat consumer.
-# #         3. Cancel watchdog.
-# #         4. Stop supervised agents.
-# #         5. Close shared Redis connection.
-# #         """
-
-# #         if not self.running:
-# #             return
-
-# #         print("=" * 80)
-# #         print("[MONITORING] Shutdown requested.")
-# #         print("=" * 80)
-
-# #         # ----------------------------------------------------
-# #         # Stop service loops
-# #         # ----------------------------------------------------
-
-# #         self.running = False
-
-# #         # ----------------------------------------------------
-# #         # Cancel heartbeat consumer
-# #         # ----------------------------------------------------
-
-# #         if self.heartbeat_task:
-# #             self.heartbeat_task.cancel()
-
-# #         # ----------------------------------------------------
-# #         # Cancel watchdog
-# #         # ----------------------------------------------------
-
-# #         if self.watchdog_task:
-# #             self.watchdog_task.cancel()
-
-# #         # ----------------------------------------------------
-# #         # Wait for monitoring tasks
-# #         # ----------------------------------------------------
-
-# #         tasks = [
-# #             task
-# #             for task in (
-# #                 self.heartbeat_task,
-# #                 self.watchdog_task,
-# #             )
-# #             if task is not None
-# #         ]
-
-# #         if tasks:
-
-# #             await asyncio.gather(
-# #                 *tasks,
-# #                 return_exceptions=True,
-# #             )
-
-# #         self.heartbeat_task = None
-# #         self.watchdog_task = None
-
-# #         # ----------------------------------------------------
-# #         # Stop supervised agents
-# #         # ----------------------------------------------------
-
-# #         try:
-
-# #             await self.supervisor.stop_all()
-
-# #         except Exception as error:
-
-# #             print(
-# #                 "[MONITORING] "
-# #                 f"Supervisor shutdown error: {error}"
-# #             )
-
-# #         # ----------------------------------------------------
-# #         # Close shared Redis connection
-# #         # ----------------------------------------------------
-
-# #         try:
-
-# #             await redis_client.aclose()
-
-# #         except Exception as error:
-
-# #             print(
-# #                 "[MONITORING] "
-# #                 f"Redis shutdown error: {error}"
-# #             )
-
-# #         # ----------------------------------------------------
-# #         # Final status
-# #         # ----------------------------------------------------
-
-# #         print("=" * 80)
-# #         print("[MONITORING] SERVICE STOPPED")
-# #         print("=" * 80)
-
-
-# # # ============================================================
-# # # MAIN
-# # # ============================================================
-
-# # async def main():
-
-# #     service = MonitoringService()
-
-# #     try:
-
-# #         await service.start()
-
-# #         await service.wait_forever()
-
-# #     except asyncio.CancelledError:
-# #         raise
-
-# #     except KeyboardInterrupt:
-
-# #         print(
-# #             "\n[MONITORING] "
-# #             "Keyboard interrupt received."
-# #         )
-
-# #     finally:
-
-# #         await service.stop()
-
-
-# # # ============================================================
-# # # ENTRY POINT
-# # # ============================================================
-
-# # if __name__ == "__main__":
-
-# #     try:
-
-# #         asyncio.run(main())
-
-# #     except KeyboardInterrupt:
-
-# #         print(
-# #             "\n[MONITORING] "
-# #             "Stopped by operator."
-# #         )
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# import asyncio
-
-# from backend.app.messaging.redis_client import redis_client
-
-# from backend.app.monitoring.heartbeat_consumer import (
-#     heartbeat_consumer_loop,
-# )
-
-# from backend.app.monitoring.supervisor import AgentSupervisor
-
-# from backend.app.monitoring.watchdog import watchdog_loop
-
-
-# # ============================================================
-# # MONITORING SERVICE
-# # ============================================================
-
-# class MonitoringService:
-#     """
-#     Unified CCTV monitoring/control service.
-
-#     Responsibilities
-#     ----------------
-#     1. Consume agent heartbeats.
-#     2. Maintain shared AgentRegistry.
-#     3. Supervise agent subprocesses.
-#     4. Detect heartbeat failures.
-#     5. Restart failed/unresponsive agents.
-#     6. Keep every agent failure isolated.
-
-#     Architecture
-#     ------------
-
-#         Agent Processes
-#                │
-#                │ heartbeat
-#                ▼
-#         Redis: events.system
-#                │
-#                ▼
-#         Heartbeat Consumer
-#                │
-#                ▼
-#         Shared AgentRegistry
-#                │
-#                ▼
-#         Agent Supervisor
-#                │
-#                ▼
-#         Heartbeat Timeout
-#                │
-#                ▼
-#         Unified Recovery
-#                │
-#                ▼
-#         Restart ONLY failed agent
-
-#     Recovery authority
-#     ------------------
-#     AgentSupervisor.recover()
-
-#     Watchdog is observational only.
-#     """
-
-#     def __init__(self):
-
-#         self.supervisor = AgentSupervisor()
-
-#         self.running = False
-
-#         self.heartbeat_task = None
-
-#         self.watchdog_task = None
-
-#     # ========================================================
-#     # START
-#     # ========================================================
-
-#     async def start(self):
-
-#         print("=" * 80)
-
-#         print(
-#             "CCTV AI MONITORING SERVICE"
-#         )
-
-#         print("=" * 80)
-
-#         print(
-#             "[MONITORING] "
-#             "Starting unified monitoring service..."
-#         )
-
-#         self.running = True
-
-#         # ----------------------------------------------------
-#         # Redis
-#         # ----------------------------------------------------
-
-#         try:
-
-#             await redis_client.ping()
-
-#             print(
-#                 "[MONITORING] "
-#                 "Redis connection established."
-#             )
-
-#         except Exception as error:
-
-#             print(
-#                 "[MONITORING] FATAL: "
-#                 f"Redis connection failed: {error}"
-#             )
-
-#             self.running = False
-
-#             raise
-
-#         # ----------------------------------------------------
-#         # Supervisor
-#         # ----------------------------------------------------
-
-#         try:
-
-#             await self.supervisor.start_all()
-
-#         except Exception as error:
-
-#             print(
-#                 "[MONITORING] "
-#                 f"Supervisor startup error: {error}"
-#             )
-
-#         # ----------------------------------------------------
-#         # Heartbeat Consumer
-#         # ----------------------------------------------------
-
-#         self.heartbeat_task = asyncio.create_task(
-#             self._run_heartbeat_consumer(),
-#             name="monitoring-heartbeat-consumer",
-#         )
-
-#         print(
-#             "[MONITORING] "
-#             "Heartbeat consumer started."
-#         )
-
-#         # ----------------------------------------------------
-#         # Watchdog
-#         #
-#         # Observational health monitor.
-#         # Supervisor remains the recovery authority.
-#         # ----------------------------------------------------
-
-#         self.watchdog_task = asyncio.create_task(
-#             self._run_watchdog(),
-#             name="monitoring-watchdog",
-#         )
-
-#         print(
-#             "[MONITORING] "
-#             "Watchdog started."
-#         )
-
-#         # ----------------------------------------------------
-#         # Ready
-#         # ----------------------------------------------------
-
-#         print("=" * 80)
-
-#         print(
-#             "[MONITORING] SERVICE READY"
-#         )
-
-#         print("=" * 80)
-
-#     # ========================================================
-#     # HEARTBEAT CONSUMER
-#     # ========================================================
-
-#     async def _run_heartbeat_consumer(self):
-
-#         while self.running:
-
-#             try:
-
-#                 await heartbeat_consumer_loop(
-#                     redis_client
-#                 )
-
-#             except asyncio.CancelledError:
-
-#                 raise
-
-#             except Exception as error:
-
-#                 print(
-#                     "[MONITORING] "
-#                     f"Heartbeat consumer crashed: "
-#                     f"{error}"
-#                 )
-
-#                 if not self.running:
-#                     break
-
-#                 print(
-#                     "[MONITORING] "
-#                     "Restarting heartbeat consumer..."
-#                 )
-
-#                 await asyncio.sleep(2)
-
-#     # ========================================================
-#     # WATCHDOG
-#     # ========================================================
-
-#     async def _run_watchdog(self):
-
-#         while self.running:
-
-#             try:
-
-#                 await watchdog_loop()
-
-#             except asyncio.CancelledError:
-
-#                 raise
-
-#             except Exception as error:
-
-#                 print(
-#                     "[MONITORING] "
-#                     f"Watchdog crashed: {error}"
-#                 )
-
-#                 if not self.running:
-#                     break
-
-#                 print(
-#                     "[MONITORING] "
-#                     "Restarting watchdog..."
-#                 )
-
-#                 await asyncio.sleep(2)
-
-#     # ========================================================
-#     # WAIT
-#     # ========================================================
-
-#     async def wait_forever(self):
-
-#         while self.running:
-
-#             await asyncio.sleep(1)
-
-#     # ========================================================
-#     # STOP
-#     # ========================================================
-
-#     async def stop(self):
-
-#         if not self.running:
-#             return
-
-#         print("=" * 80)
-
-#         print(
-#             "[MONITORING] "
-#             "Shutdown requested."
-#         )
-
-#         print("=" * 80)
-
-#         self.running = False
-
-#         # ----------------------------------------------------
-#         # Cancel monitoring tasks
-#         # ----------------------------------------------------
-
-#         if self.heartbeat_task:
-
-#             self.heartbeat_task.cancel()
-
-#         if self.watchdog_task:
-
-#             self.watchdog_task.cancel()
-
-#         tasks = [
-#             task
-#             for task in (
-#                 self.heartbeat_task,
-#                 self.watchdog_task,
-#             )
-#             if task is not None
-#         ]
-
-#         if tasks:
-
-#             await asyncio.gather(
-#                 *tasks,
-#                 return_exceptions=True,
-#             )
-
-#         self.heartbeat_task = None
-
-#         self.watchdog_task = None
-
-#         # ----------------------------------------------------
-#         # Stop agents
-#         # ----------------------------------------------------
-
-#         try:
-
-#             await self.supervisor.stop_all()
-
-#         except Exception as error:
-
-#             print(
-#                 "[MONITORING] "
-#                 f"Supervisor shutdown error: "
-#                 f"{error}"
-#             )
-
-#         # ----------------------------------------------------
-#         # Close Redis
-#         # ----------------------------------------------------
-
-#         try:
-
-#             await redis_client.aclose()
-
-#         except Exception as error:
-
-#             print(
-#                 "[MONITORING] "
-#                 f"Redis shutdown error: "
-#                 f"{error}"
-#             )
-
-#         print("=" * 80)
-
-#         print(
-#             "[MONITORING] SERVICE STOPPED"
-#         )
-
-#         print("=" * 80)
-
-
-# # ============================================================
-# # MAIN
-# # ============================================================
-
-# async def main():
-
-#     service = MonitoringService()
-
-#     try:
-
-#         await service.start()
-
-#         await service.wait_forever()
-
-#     except asyncio.CancelledError:
-
-#         raise
-
-#     except KeyboardInterrupt:
-
-#         print(
-#             "\n[MONITORING] "
-#             "Keyboard interrupt received."
-#         )
-
-#     finally:
-
-#         await service.stop()
-
-
-# # ============================================================
-# # ENTRY POINT
-# # ============================================================
-
-# if __name__ == "__main__":
-
-#     try:
-
-#         asyncio.run(main())
-
-#     except KeyboardInterrupt:
-
-#         print(
-#             "\n[MONITORING] "
-#             "Stopped by operator."
-#         )
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 from __future__ import annotations
 
 import asyncio
@@ -1328,10 +9,10 @@ from backend.app.monitoring.heartbeat_consumer import (
 from backend.app.monitoring.supervisor import AgentSupervisor
 from backend.app.monitoring.watchdog import watchdog_loop
 
-
 # ============================================================
 # MONITORING SERVICE
 # ============================================================
+
 
 class MonitoringService:
     """
@@ -1351,33 +32,33 @@ class MonitoringService:
     ------------
 
         Agent Processes
-              │
-              │ heartbeat
-              ▼
+            │
+            │ heartbeat
+            ▼
         Redis: events.system
-              │
-              ▼
+            │
+            ▼
         Heartbeat Consumer
-              │
-              ▼
+            │
+            ▼
         Shared AgentRegistry
-              │
-              ├──────────────► Watchdog
-              │                  │
-              │                  │ observation
-              │                  ▼
-              │             Health State
-              │
-              ▼
+            │
+            ├──────────────► Watchdog
+            │                │
+            │                │ observation
+            │                ▼
+            │            Health State
+            │
+            ▼
         Agent Supervisor
-              │
-              ▼
+            │
+            ▼
         Heartbeat Timeout
-              │
-              ▼
+            │
+            ▼
         Unified Recovery
-              │
-              ▼
+            │
+            ▼
         Restart ONLY failed agent
 
     Recovery authority
@@ -1389,16 +70,27 @@ class MonitoringService:
     Fault isolation
     ---------------
     Failure of:
+
         - one camera
         - one camera stream
         - one detector
         - one agent
         - one heartbeat
         - one processing worker
-        - watchdog
         - heartbeat consumer
+        - watchdog
 
     must not intentionally terminate unrelated agents.
+
+    Redis ownership
+    ---------------
+    `redis_client` is imported from the application's shared
+    messaging layer.
+
+    MonitoringService uses that client but does NOT close it.
+
+    The application-level Redis lifecycle owns creation and
+    shutdown of the shared client.
     """
 
     def __init__(self) -> None:
@@ -1433,7 +125,10 @@ class MonitoringService:
         """
 
         if self.running:
-            print("[MONITORING] Service is already running.")
+            print(
+                "[MONITORING] "
+                "Service is already running."
+            )
             return
 
         print("=" * 80)
@@ -1446,6 +141,7 @@ class MonitoringService:
         )
 
         self.running = True
+        self._started = False
 
         # ----------------------------------------------------
         # Redis
@@ -1458,6 +154,10 @@ class MonitoringService:
                 "[MONITORING] "
                 "Redis connection established."
             )
+
+        except asyncio.CancelledError:
+            self.running = False
+            raise
 
         except Exception as error:
             self.running = False
@@ -1476,25 +176,39 @@ class MonitoringService:
         try:
             await self.supervisor.start_all()
 
+        except asyncio.CancelledError:
+            self.running = False
+
+            try:
+                await self.supervisor.stop_all()
+            except Exception as cleanup_error:
+                print(
+                    "[MONITORING] "
+                    "Supervisor cleanup after cancellation "
+                    f"failed: {cleanup_error}"
+                )
+
+            raise
+
         except Exception as error:
             print(
                 "[MONITORING] "
                 f"Supervisor startup error: {error}"
             )
 
-            # The supervisor may already have started some
-            # isolated agents before encountering an exception.
-            #
-            # Do not falsely declare the service ready.
             self.running = False
 
             try:
                 await self.supervisor.stop_all()
-            except Exception as stop_error:
+
+            except asyncio.CancelledError:
+                raise
+
+            except Exception as cleanup_error:
                 print(
                     "[MONITORING] "
                     "Supervisor cleanup after startup failure "
-                    f"also failed: {stop_error}"
+                    f"also failed: {cleanup_error}"
                 )
 
             raise
@@ -1514,6 +228,22 @@ class MonitoringService:
                 "Heartbeat consumer started."
             )
 
+        except asyncio.CancelledError:
+            self.running = False
+
+            await self._cancel_monitoring_tasks()
+
+            try:
+                await self.supervisor.stop_all()
+            except Exception as cleanup_error:
+                print(
+                    "[MONITORING] "
+                    "Supervisor cleanup after cancellation "
+                    f"failed: {cleanup_error}"
+                )
+
+            raise
+
         except Exception as error:
             print(
                 "[MONITORING] "
@@ -1522,12 +252,14 @@ class MonitoringService:
 
             self.running = False
 
+            await self._cancel_monitoring_tasks()
+
             try:
                 await self.supervisor.stop_all()
-            except Exception as stop_error:
+            except Exception as cleanup_error:
                 print(
                     "[MONITORING] "
-                    f"Supervisor cleanup failed: {stop_error}"
+                    f"Supervisor cleanup failed: {cleanup_error}"
                 )
 
             raise
@@ -1551,6 +283,22 @@ class MonitoringService:
                 "Watchdog started."
             )
 
+        except asyncio.CancelledError:
+            self.running = False
+
+            await self._cancel_monitoring_tasks()
+
+            try:
+                await self.supervisor.stop_all()
+            except Exception as cleanup_error:
+                print(
+                    "[MONITORING] "
+                    "Supervisor cleanup after cancellation "
+                    f"failed: {cleanup_error}"
+                )
+
+            raise
+
         except Exception as error:
             print(
                 "[MONITORING] "
@@ -1563,10 +311,10 @@ class MonitoringService:
 
             try:
                 await self.supervisor.stop_all()
-            except Exception as stop_error:
+            except Exception as cleanup_error:
                 print(
                     "[MONITORING] "
-                    f"Supervisor cleanup failed: {stop_error}"
+                    f"Supervisor cleanup failed: {cleanup_error}"
                 )
 
             raise
@@ -1600,10 +348,6 @@ class MonitoringService:
                     redis_client
                 )
 
-                # Normally heartbeat_consumer_loop() should remain
-                # alive. If it returns unexpectedly while the
-                # service is still running, do not silently stop
-                # monitoring.
                 if self.running:
                     print(
                         "[MONITORING] "
@@ -1613,13 +357,17 @@ class MonitoringService:
                     await asyncio.sleep(1)
 
             except asyncio.CancelledError:
+                print(
+                    "[MONITORING] "
+                    "Heartbeat consumer cancellation received."
+                )
                 raise
 
             except Exception as error:
                 print(
                     "[MONITORING] "
                     "Heartbeat consumer crashed: "
-                    f"{error}"
+                    f"{type(error).__name__}: {error}"
                 )
 
                 if not self.running:
@@ -1652,8 +400,6 @@ class MonitoringService:
             try:
                 await watchdog_loop()
 
-                # A watchdog loop returning unexpectedly should
-                # not silently disable health monitoring.
                 if self.running:
                     print(
                         "[MONITORING] "
@@ -1663,12 +409,17 @@ class MonitoringService:
                     await asyncio.sleep(1)
 
             except asyncio.CancelledError:
+                print(
+                    "[MONITORING] "
+                    "Watchdog cancellation received."
+                )
                 raise
 
             except Exception as error:
                 print(
                     "[MONITORING] "
-                    f"Watchdog crashed: {error}"
+                    f"Watchdog crashed: "
+                    f"{type(error).__name__}: {error}"
                 )
 
                 if not self.running:
@@ -1692,19 +443,31 @@ class MonitoringService:
         This function does not stop supervised agents.
         """
 
-        tasks = []
+        tasks: list[asyncio.Task] = []
 
-        if self.heartbeat_task is not None:
-            if not self.heartbeat_task.done():
-                self.heartbeat_task.cancel()
+        heartbeat_task = self.heartbeat_task
 
-            tasks.append(self.heartbeat_task)
+        if heartbeat_task is not None:
 
-        if self.watchdog_task is not None:
-            if not self.watchdog_task.done():
-                self.watchdog_task.cancel()
+            if (
+                not heartbeat_task.done()
+                and not heartbeat_task.cancelled()
+            ):
+                heartbeat_task.cancel()
 
-            tasks.append(self.watchdog_task)
+            tasks.append(heartbeat_task)
+
+        watchdog_task = self.watchdog_task
+
+        if watchdog_task is not None:
+
+            if (
+                not watchdog_task.done()
+                and not watchdog_task.cancelled()
+            ):
+                watchdog_task.cancel()
+
+            tasks.append(watchdog_task)
 
         if tasks:
             await asyncio.gather(
@@ -1716,44 +479,96 @@ class MonitoringService:
         self.watchdog_task = None
 
     # ========================================================
+    # TASK STATUS
+    # ========================================================
+
+    @staticmethod
+    def _task_failure(
+        task: asyncio.Task | None,
+    ) -> BaseException | None:
+        """
+        Safely retrieve a task exception.
+
+        Important:
+            task.exception() raises CancelledError when the task
+            was cancelled, so cancellation must be checked first.
+        """
+
+        if task is None:
+            return None
+
+        if not task.done():
+            return None
+
+        if task.cancelled():
+            return None
+
+        try:
+            return task.exception()
+        except asyncio.CancelledError:
+            return None
+        except Exception as error:
+            return error
+
+    # ========================================================
     # WAIT
     # ========================================================
 
     async def wait_forever(self) -> None:
         """
         Keep the monitoring service alive.
+
+        Monitoring tasks normally self-recover through their
+        wrapper loops.
+
+        This method only observes unexpected task termination
+        and never directly restarts agents.
         """
 
         while self.running:
 
-            # Detect a monitoring task that unexpectedly died.
+            # ------------------------------------------------
+            # Heartbeat task
+            # ------------------------------------------------
+
+            heartbeat_task = self.heartbeat_task
 
             if (
-                self.heartbeat_task is not None
-                and self.heartbeat_task.done()
+                heartbeat_task is not None
+                and heartbeat_task.done()
                 and self.running
             ):
-                error = self.heartbeat_task.exception()
+                error = self._task_failure(
+                    heartbeat_task
+                )
 
                 if error is not None:
                     print(
                         "[MONITORING] "
                         "Heartbeat monitoring task terminated: "
-                        f"{error}"
+                        f"{type(error).__name__}: {error}"
                     )
 
+            # ------------------------------------------------
+            # Watchdog task
+            # ------------------------------------------------
+
+            watchdog_task = self.watchdog_task
+
             if (
-                self.watchdog_task is not None
-                and self.watchdog_task.done()
+                watchdog_task is not None
+                and watchdog_task.done()
                 and self.running
             ):
-                error = self.watchdog_task.exception()
+                error = self._task_failure(
+                    watchdog_task
+                )
 
                 if error is not None:
                     print(
                         "[MONITORING] "
                         "Watchdog monitoring task terminated: "
-                        f"{error}"
+                        f"{type(error).__name__}: {error}"
                     )
 
             await asyncio.sleep(1)
@@ -1774,7 +589,9 @@ class MonitoringService:
                  ↓
             stop supervised agents
                  ↓
-            close Redis
+            application owns Redis lifecycle
+
+        The shared `redis_client` is intentionally NOT closed here.
         """
 
         if not self.running and not self._started:
@@ -1793,10 +610,14 @@ class MonitoringService:
         try:
             await self._cancel_monitoring_tasks()
 
+        except asyncio.CancelledError:
+            raise
+
         except Exception as error:
             print(
                 "[MONITORING] "
-                f"Monitoring task shutdown error: {error}"
+                "Monitoring task shutdown error: "
+                f"{type(error).__name__}: {error}"
             )
 
         # ----------------------------------------------------
@@ -1806,24 +627,32 @@ class MonitoringService:
         try:
             await self.supervisor.stop_all()
 
-        except Exception as error:
-            print(
-                "[MONITORING] "
-                f"Supervisor shutdown error: {error}"
-            )
-
-        # ----------------------------------------------------
-        # Close Redis
-        # ----------------------------------------------------
-
-        try:
-            await redis_client.aclose()
+        except asyncio.CancelledError:
+            raise
 
         except Exception as error:
             print(
                 "[MONITORING] "
-                f"Redis shutdown error: {error}"
+                "Supervisor shutdown error: "
+                f"{type(error).__name__}: {error}"
             )
+
+        # ----------------------------------------------------
+        # Redis
+        # ----------------------------------------------------
+        #
+        # IMPORTANT:
+        #
+        # redis_client is the shared application Redis client.
+        # MonitoringService does not own its lifecycle.
+        #
+        # The application/bootstrap layer should call:
+        #
+        #     await redis_client.aclose()
+        #
+        # when the entire application shuts down.
+        #
+        # ----------------------------------------------------
 
         self._started = False
 
@@ -1835,6 +664,7 @@ class MonitoringService:
 # ============================================================
 # MAIN
 # ============================================================
+
 
 async def main() -> None:
     service = MonitoringService()
@@ -1855,7 +685,8 @@ async def main() -> None:
     except Exception as error:
         print(
             "\n[MONITORING] "
-            f"Fatal service error: {error}"
+            f"Fatal service error: "
+            f"{type(error).__name__}: {error}"
         )
 
     finally:
@@ -1865,6 +696,7 @@ async def main() -> None:
 # ============================================================
 # ENTRY POINT
 # ============================================================
+
 
 if __name__ == "__main__":
     try:

@@ -3,7 +3,8 @@ Evidence Agent for the CCTV AI surveillance platform.
 
 Responsibilities
 ----------------
-- Consume canonical alert.created events from Redis.
+- Consume canonical evidence.requested events from Redis.
+- Accept legacy alert.created events for backward compatibility.
 - Isolate each evidence job from other jobs.
 - Generate proof-video evidence when a source video is available.
 - Support live rolling-buffer evidence requests.
@@ -3146,9 +3147,16 @@ class EvidenceAgent(BaseAgent):
 
             return
 
-        if event.event_type != (
-            "alert.created"
-        ):
+        # IncidentAgent publishes evidence requests to events.evidence.requests
+        # using the canonical event type `evidence.requested`.
+        # Older implementations used `alert.created`; keep that as a
+        # compatibility input so existing queued events can still be processed.
+        supported_event_types = {
+            "evidence.requested",
+            "alert.created",
+        }
+
+        if event.event_type not in supported_event_types:
             print(
                 "[EVIDENCE] Ignoring unsupported "
                 f"event_type={event.event_type} "
@@ -3633,3 +3641,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

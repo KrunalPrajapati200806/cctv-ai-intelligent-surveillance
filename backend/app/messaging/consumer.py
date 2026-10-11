@@ -3,29 +3,39 @@
 
 # # Responsibilities
 # # ----------------
-# # - Consume canonical alert.created events from events.alerts.
+
+# # - Provide canonical incident database persistence helpers.
 # # - Create/update incidents in SQLite.
 # # - Consume canonical evidence.generated/evidence.failed events.
 # # - Link evidence results back to incidents.
 # # - Validate canonical events before processing.
-# # - ACK Redis messages only after successful processing.
-# # - Recover pending messages after restart.
-# # - Claim stale messages from failed consumers.
-# # - Isolate malformed/failed messages.
+# # - ACK Redis evidence messages only after successful processing.
+# # - Recover pending evidence messages after restart.
+# # - Claim stale evidence messages from failed consumers.
+# # - Isolate malformed/failed evidence messages.
 
 # # Non-responsibilities
 # # --------------------
-# # - API-facing stream queries.
+
+# # - Consuming alert.created events.
+# # - Alert -> incident orchestration.
 # # - Agent supervision.
 # # - Camera processing.
 # # - Object detection.
 # # - Evidence generation.
+# # - API-facing Redis stream queries.
+
+# # Alert -> incident orchestration belongs to:
+
+# #     agents.incident.main
 
 # # API-facing Redis event queries belong to:
+
 # #     backend.app.messaging.event_consumer
 
-# # Incident Agent entry point:
-# #     agents.incident.main
+# # Evidence generation belongs to:
+
+# #     agents.evidence.main
 # # """
 
 # # from __future__ import annotations
@@ -40,56 +50,37 @@
 # # from pathlib import Path
 # # from typing import Any
 
+# # from backend.app.incidents.paths import incident_database_path
 # # from backend.app.messaging.redis_client import redis_client
 # # from shared.schemas.event_schema import validate_event
 
 
 # # # ============================================================
-# # # CONFIGURATION
+# # # DATABASE CONFIGURATION
 # # # ============================================================
 
-# # STREAM_NAME = os.getenv(
-# #     "INCIDENT_INPUT_STREAM",
-# #     "events.alerts",
-# # )
-
-# # GROUP_NAME = os.getenv(
-# #     "INCIDENT_GROUP",
-# #     "incident-workers",
-# # )
-
-# # CONSUMER_NAME = os.getenv(
-# #     "INCIDENT_CONSUMER_NAME",
-# #     f"incident-{socket.gethostname()}-{uuid.uuid4().hex[:8]}",
-# # )
-
-# # DATABASE_PATH = Path(
-# #     os.getenv(
-# #         "INCIDENT_DATABASE",
-# #         "data/incidents.db",
-# #     )
-# # )
-
-# # SUPPORTED_EVENT_TYPE = "alert.created"
+# # DATABASE_PATH = incident_database_path()
 
 
 # # # ============================================================
-# # # EVIDENCE CONFIGURATION
+# # # EVIDENCE STREAM CONFIGURATION
 # # # ============================================================
 
 # # EVIDENCE_STREAM_NAME = os.getenv(
 # #     "INCIDENT_EVIDENCE_INPUT_STREAM",
 # #     "events.evidence",
-# # )
+# # ).strip() or "events.evidence"
 
 # # EVIDENCE_GROUP_NAME = os.getenv(
 # #     "INCIDENT_EVIDENCE_GROUP",
 # #     "incident-evidence-workers",
-# # )
+# # ).strip() or "incident-evidence-workers"
 
 # # EVIDENCE_CONSUMER_NAME = os.getenv(
 # #     "INCIDENT_EVIDENCE_CONSUMER_NAME",
 # #     f"incident-evidence-{socket.gethostname()}-{uuid.uuid4().hex[:8]}",
+# # ).strip() or (
+# #     f"incident-evidence-{socket.gethostname()}-{uuid.uuid4().hex[:8]}"
 # # )
 
 # # SUPPORTED_EVIDENCE_EVENT_TYPES = {
@@ -105,11 +96,14 @@
 # # DEFAULT_STATUS = "OPEN"
 # # DEFAULT_EVIDENCE_STATUS = "PENDING"
 
-# # PENDING_CLAIM_IDLE_MS = int(
-# #     os.getenv(
-# #         "INCIDENT_PENDING_CLAIM_IDLE_MS",
-# #         "30000",
-# #     )
+# # PENDING_CLAIM_IDLE_MS = max(
+# #     1000,
+# #     int(
+# #         os.getenv(
+# #             "INCIDENT_PENDING_CLAIM_IDLE_MS",
+# #             "120000",
+# #         )
+# #     ),
 # # )
 
 # # READ_COUNT = max(
@@ -142,6 +136,16 @@
 # #     ),
 # # )
 
+# # CONSUMER_RESTART_DELAY_SECONDS = max(
+# #     0.1,
+# #     float(
+# #         os.getenv(
+# #             "INCIDENT_CONSUMER_RESTART_DELAY_SECONDS",
+# #             "2",
+# #         )
+# #     ),
+# # )
+
 
 # # # ============================================================
 # # # DATABASE
@@ -153,7 +157,8 @@
 # #     Open a SQLite connection configured for concurrent workers.
 
 # #     WAL allows readers and writers to coexist more effectively.
-# #     busy_timeout reduces transient 'database is locked' failures.
+
+# #     busy_timeout reduces transient database-lock failures.
 # #     """
 
 # #     DATABASE_PATH.parent.mkdir(
@@ -185,10 +190,15 @@
 
 # # def ensure_incidents_table() -> None:
 # #     """
-# #     Create or migrate the incidents table.
+# #     Create or migrate the canonical incidents table.
 
-# #     This function is intentionally synchronous because it is used
-# #     from worker threads through asyncio.to_thread().
+# #     This function is synchronous intentionally.
+
+# #     Async callers should use:
+
+# #         await asyncio.to_thread(
+# #             ensure_incidents_table
+# #         )
 # #     """
 
 # #     conn = get_database_connection()
@@ -199,50 +209,37 @@
 # #             CREATE TABLE IF NOT EXISTS incidents (
 # #                 incident_id TEXT PRIMARY KEY,
 # #                 alert_event_id TEXT UNIQUE NOT NULL,
+# #                 event_id TEXT,
+# #                 camera_id TEXT,
+# #                 event_type TEXT NOT NULL,
 # #                 alert_type TEXT NOT NULL,
 # #                 severity TEXT NOT NULL,
-
-# #                 camera_id TEXT,
-
-# #                 status TEXT NOT NULL DEFAULT 'OPEN',
-
+# #                 mode TEXT,
 # #                 trace_id TEXT,
 # #                 correlation_id TEXT,
-
 # #                 source_agent_id TEXT,
 # #                 source_instance_id TEXT,
 # #                 source_hostname TEXT,
-
+# #                 source_redis_id TEXT,
 # #                 person_count INTEGER,
 # #                 threshold REAL,
-
 # #                 frame_id INTEGER,
 # #                 frame_timestamp REAL,
-
 # #                 track_ids TEXT,
-
 # #                 message TEXT,
-
-# #                 source_video TEXT,
-# #                 video_id TEXT,
-
-# #                 start_time TEXT,
-# #                 end_time TEXT,
-
-# #                 evidence_status TEXT
-# #                     NOT NULL DEFAULT 'PENDING',
-
+# #                 status TEXT NOT NULL DEFAULT 'OPEN',
+# #                 evidence_status TEXT NOT NULL DEFAULT 'PENDING',
 # #                 evidence_type TEXT,
 # #                 evidence_event_id TEXT,
-
 # #                 proof_path TEXT,
 # #                 proof_filename TEXT,
-
+# #                 source_video TEXT,
+# #                 video_id TEXT,
+# #                 start_time TEXT,
+# #                 end_time TEXT,
 # #                 evidence_duration REAL,
 # #                 evidence_reason TEXT,
-
 # #                 evidence_updated_at TEXT,
-
 # #                 created_at TEXT NOT NULL,
 # #                 updated_at TEXT NOT NULL
 # #             )
@@ -256,13 +253,21 @@
 # #             ).fetchall()
 # #         }
 
-# #         required_columns = {
+# #         # --------------------------------------------------------
+# #         # Safe additive migrations.
+# #         # --------------------------------------------------------
+
+# #         migrations: dict[str, str] = {
+# #             "event_id": "TEXT",
 # #             "camera_id": "TEXT",
+# #             "event_type": "TEXT",
+# #             "mode": "TEXT",
 # #             "trace_id": "TEXT",
 # #             "correlation_id": "TEXT",
 # #             "source_agent_id": "TEXT",
 # #             "source_instance_id": "TEXT",
 # #             "source_hostname": "TEXT",
+# #             "source_redis_id": "TEXT",
 # #             "person_count": "INTEGER",
 # #             "threshold": "REAL",
 # #             "frame_id": "INTEGER",
@@ -273,7 +278,7 @@
 # #             "video_id": "TEXT",
 # #             "start_time": "TEXT",
 # #             "end_time": "TEXT",
-# #             "evidence_status": "TEXT DEFAULT 'PENDING'",
+# #             "evidence_status": "TEXT",
 # #             "evidence_type": "TEXT",
 # #             "evidence_event_id": "TEXT",
 # #             "proof_path": "TEXT",
@@ -285,10 +290,8 @@
 # #             "updated_at": "TEXT",
 # #         }
 
-# #         for column, definition in required_columns.items():
-
+# #         for column, definition in migrations.items():
 # #             if column not in columns:
-
 # #                 conn.execute(
 # #                     f"""
 # #                     ALTER TABLE incidents
@@ -296,11 +299,79 @@
 # #                     """
 # #                 )
 
+# #         # --------------------------------------------------------
+# #         # Backfill timestamps.
+# #         # --------------------------------------------------------
+
+# #         now = datetime.now(
+# #             timezone.utc
+# #         ).isoformat()
+
+# #         conn.execute(
+# #             """
+# #             UPDATE incidents
+# #             SET created_at = COALESCE(
+# #                 created_at,
+# #                 ?
+# #             )
+# #             WHERE created_at IS NULL
+# #             """,
+# #             (now,),
+# #         )
+
+# #         conn.execute(
+# #             """
+# #             UPDATE incidents
+# #             SET updated_at = COALESCE(
+# #                 updated_at,
+# #                 created_at,
+# #                 ?
+# #             )
+# #             WHERE updated_at IS NULL
+# #             """,
+# #             (now,),
+# #         )
+
+# #         conn.execute(
+# #             """
+# #             UPDATE incidents
+# #             SET event_type = COALESCE(
+# #                 event_type,
+# #                 'alert.created'
+# #             )
+# #             WHERE event_type IS NULL
+# #             """
+# #         )
+
+# #         conn.execute(
+# #             """
+# #             UPDATE incidents
+# #             SET evidence_status = COALESCE(
+# #                 evidence_status,
+# #                 ?
+# #             )
+# #             WHERE evidence_status IS NULL
+# #             """,
+# #             (DEFAULT_EVIDENCE_STATUS,),
+# #         )
+
+# #         # --------------------------------------------------------
+# #         # Indexes.
+# #         # --------------------------------------------------------
+
 # #         conn.execute(
 # #             """
 # #             CREATE UNIQUE INDEX IF NOT EXISTS
 # #             idx_incidents_alert_event_id
 # #             ON incidents(alert_event_id)
+# #             """
+# #         )
+
+# #         conn.execute(
+# #             """
+# #             CREATE INDEX IF NOT EXISTS
+# #             idx_incidents_event_id
+# #             ON incidents(event_id)
 # #             """
 # #         )
 
@@ -360,6 +431,15 @@
 # #             """
 # #         )
 
+# #         conn.execute(
+# #             """
+# #             CREATE UNIQUE INDEX IF NOT EXISTS
+# #             idx_incidents_evidence_event_id
+# #             ON incidents(evidence_event_id)
+# #             WHERE evidence_event_id IS NOT NULL
+# #             """
+# #         )
+
 # #         conn.commit()
 
 # #     finally:
@@ -377,8 +457,8 @@
 # #     """
 # #     Parse an ISO timestamp and normalize it to UTC.
 
-# #     Numeric video-relative timestamps are intentionally not
-# #     interpreted here; they are handled separately as durations.
+# #     Numeric values are intentionally not interpreted as
+# #     wall-clock timestamps.
 # #     """
 
 # #     if value is None:
@@ -388,7 +468,6 @@
 # #         dt = value
 
 # #     elif isinstance(value, str):
-
 # #         value = value.strip()
 
 # #         if not value:
@@ -398,7 +477,10 @@
 # #             normalized = value
 
 # #             if normalized.endswith("Z"):
-# #                 normalized = normalized[:-1] + "+00:00"
+# #                 normalized = (
+# #                     normalized[:-1]
+# #                     + "+00:00"
+# #                 )
 
 # #             dt = datetime.fromisoformat(
 # #                 normalized
@@ -426,16 +508,18 @@
 # #     event: dict[str, Any],
 # # ) -> str:
 # #     """
-# #     Determine the wall-clock event time.
+# #     Determine wall-clock event time.
 
 # #     Priority:
+
 # #         data.event_timestamp
 # #         data.frame_datetime
 # #         event.timestamp
 # #         current UTC time
 
-# #     Numeric frame_timestamp/event_time values are video-relative
-# #     seconds and are therefore NOT converted into wall-clock time.
+# #     Numeric frame_timestamp/event_time values are treated
+# #     as video-relative values and are not converted to
+# #     wall-clock timestamps.
 # #     """
 
 # #     data = event.get(
@@ -444,12 +528,10 @@
 # #     )
 
 # #     if isinstance(data, dict):
-
 # #         for key in (
 # #             "event_timestamp",
 # #             "frame_datetime",
 # #         ):
-
 # #             parsed = parse_timestamp(
 # #                 data.get(key)
 # #             )
@@ -457,12 +539,12 @@
 # #             if parsed:
 # #                 return parsed
 
-# #     parsed_event_timestamp = parse_timestamp(
+# #     parsed = parse_timestamp(
 # #         event.get("timestamp")
 # #     )
 
-# #     if parsed_event_timestamp:
-# #         return parsed_event_timestamp
+# #     if parsed:
+# #         return parsed
 
 # #     return datetime.now(
 # #         timezone.utc
@@ -515,8 +597,14 @@
 # #     if value is None:
 # #         return []
 
-# #     if isinstance(value, (list, tuple, set)):
-
+# #     if isinstance(
+# #         value,
+# #         (
+# #             list,
+# #             tuple,
+# #             set,
+# #         ),
+# #     ):
 # #         return [
 # #             str(item)
 # #             for item in value
@@ -537,11 +625,13 @@
 # #     """
 # #     Create an incident from a canonical alert.created event.
 
-# #     Idempotency:
-# #         alert_event_id is UNIQUE.
+# #     This function is called by:
 
-# #     If the same event is received again, the existing incident is
-# #     returned instead of creating a duplicate.
+# #         agents.incident.main
+
+# #     It is NOT called by the Redis consumer service.
+
+# #     Idempotency is based on alert_event_id.
 # #     """
 
 # #     if not isinstance(event, dict):
@@ -553,13 +643,36 @@
 # #         event
 # #     )
 
-# #     event = validated_event.to_dict()
+# #     if hasattr(
+# #         validated_event,
+# #         "to_dict",
+# #     ):
+# #         event = validated_event.to_dict()
+
+# #     elif hasattr(
+# #         validated_event,
+# #         "model_dump",
+# #     ):
+# #         event = validated_event.model_dump(
+# #             mode="json"
+# #         )
+
+# #     elif isinstance(
+# #         validated_event,
+# #         dict,
+# #     ):
+# #         event = validated_event
+
+# #     else:
+# #         raise ValueError(
+# #             "Validated event has unsupported type"
+# #         )
 
 # #     event_type = event.get(
 # #         "event_type"
 # #     )
 
-# #     if event_type != SUPPORTED_EVENT_TYPE:
+# #     if event_type != "alert.created":
 # #         raise ValueError(
 # #             f"Unsupported event type: {event_type}"
 # #         )
@@ -578,7 +691,10 @@
 # #         {},
 # #     )
 
-# #     if not isinstance(camera, dict):
+# #     if not isinstance(
+# #         camera,
+# #         dict,
+# #     ):
 # #         camera = {}
 
 # #     context = event.get(
@@ -586,7 +702,10 @@
 # #         {},
 # #     )
 
-# #     if not isinstance(context, dict):
+# #     if not isinstance(
+# #         context,
+# #         dict,
+# #     ):
 # #         context = {}
 
 # #     data = event.get(
@@ -594,7 +713,10 @@
 # #         {},
 # #     )
 
-# #     if not isinstance(data, dict):
+# #     if not isinstance(
+# #         data,
+# #         dict,
+# #     ):
 # #         raise ValueError(
 # #             "Alert event data must be an object"
 # #         )
@@ -604,7 +726,10 @@
 # #         {},
 # #     )
 
-# #     if not isinstance(source, dict):
+# #     if not isinstance(
+# #         source,
+# #         dict,
+# #     ):
 # #         source = {}
 
 # #     incident_id = (
@@ -630,6 +755,10 @@
 # #         )
 # #     )
 
+# #     mode = context.get(
+# #         "mode"
+# #     )
+
 # #     trace_id = context.get(
 # #         "trace_id"
 # #     )
@@ -651,28 +780,40 @@
 # #     )
 
 # #     person_count = safe_int(
-# #         data.get("person_count")
+# #         data.get(
+# #             "person_count"
+# #         )
 # #     )
 
 # #     threshold = safe_float(
-# #         data.get("threshold")
+# #         data.get(
+# #             "threshold"
+# #         )
 # #     )
 
 # #     frame_id = safe_int(
-# #         data.get("frame_id")
+# #         data.get(
+# #             "frame_id"
+# #         )
 # #     )
 
 # #     frame_timestamp = safe_float(
-# #         data.get("frame_timestamp")
+# #         data.get(
+# #             "frame_timestamp"
+# #         )
 # #     )
 
 # #     if frame_timestamp is None:
 # #         frame_timestamp = safe_float(
-# #             data.get("event_time")
+# #             data.get(
+# #                 "event_time"
+# #             )
 # #         )
 
 # #     track_ids = normalize_track_ids(
-# #         data.get("track_ids")
+# #         data.get(
+# #             "track_ids"
+# #         )
 # #     )
 
 # #     message = data.get(
@@ -699,11 +840,16 @@
 
 # #     try:
 
+# #         # --------------------------------------------------------
+# #         # Idempotency lookup.
+# #         # --------------------------------------------------------
+
 # #         existing = conn.execute(
 # #             """
 # #             SELECT
 # #                 incident_id,
 # #                 alert_event_id,
+# #                 event_id,
 # #                 alert_type,
 # #                 severity,
 # #                 camera_id,
@@ -728,9 +874,9 @@
 
 # #         if existing:
 
-# #             existing_incident_id = (
-# #                 existing["incident_id"]
-# #             )
+# #             existing_incident_id = existing[
+# #                 "incident_id"
+# #             ]
 
 # #             conn.execute(
 # #                 """
@@ -761,14 +907,24 @@
 # #                 "action": "UPDATED",
 # #                 "incident_id": existing_incident_id,
 # #                 "alert_event_id": event_id,
-# #                 "camera_id": existing["camera_id"],
-# #                 "alert_type": existing["alert_type"],
-# #                 "severity": existing["severity"],
+# #                 "camera_id": existing[
+# #                     "camera_id"
+# #                 ],
+# #                 "alert_type": existing[
+# #                     "alert_type"
+# #                 ],
+# #                 "severity": existing[
+# #                     "severity"
+# #                 ],
 # #                 "person_count": person_count,
 # #                 "evidence_status": existing[
 # #                     "evidence_status"
 # #                 ],
 # #             }
+
+# #         # --------------------------------------------------------
+# #         # Insert.
+# #         # --------------------------------------------------------
 
 # #         try:
 
@@ -777,10 +933,12 @@
 # #                 INSERT INTO incidents (
 # #                     incident_id,
 # #                     alert_event_id,
+# #                     event_id,
+# #                     camera_id,
+# #                     event_type,
 # #                     alert_type,
 # #                     severity,
-# #                     camera_id,
-# #                     status,
+# #                     mode,
 # #                     trace_id,
 # #                     correlation_id,
 # #                     source_agent_id,
@@ -792,26 +950,30 @@
 # #                     frame_timestamp,
 # #                     track_ids,
 # #                     message,
+# #                     status,
+# #                     evidence_status,
 # #                     source_video,
 # #                     video_id,
 # #                     start_time,
 # #                     end_time,
-# #                     evidence_status,
 # #                     created_at,
 # #                     updated_at
 # #                 )
 # #                 VALUES (
-# #                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-# #                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+# #                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+# #                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+# #                     ?, ?, ?, ?, ?, ?, ?
 # #                 )
 # #                 """,
 # #                 (
 # #                     incident_id,
 # #                     event_id,
+# #                     event_id,
+# #                     camera_id,
+# #                     event_type,
 # #                     alert_type,
 # #                     severity,
-# #                     camera_id,
-# #                     DEFAULT_STATUS,
+# #                     mode,
 # #                     trace_id,
 # #                     correlation_id,
 # #                     source_agent_id,
@@ -821,15 +983,14 @@
 # #                     threshold,
 # #                     frame_id,
 # #                     frame_timestamp,
-# #                     json.dumps(
-# #                         track_ids
-# #                     ),
+# #                     json.dumps(track_ids),
 # #                     message,
+# #                     DEFAULT_STATUS,
+# #                     DEFAULT_EVIDENCE_STATUS,
 # #                     source_video,
 # #                     video_id,
 # #                     event_time,
 # #                     event_time,
-# #                     DEFAULT_EVIDENCE_STATUS,
 # #                     now,
 # #                     now,
 # #                 ),
@@ -839,8 +1000,8 @@
 
 # #         except sqlite3.IntegrityError:
 
-# #             # Another worker may have inserted the same alert
-# #             # concurrently. Resolve the winner instead of failing.
+# #             conn.rollback()
+
 # #             existing = conn.execute(
 # #                 """
 # #                 SELECT
@@ -901,17 +1062,31 @@
 # # # ============================================================
 
 
+
 # # def update_evidence_sync(
 # #     event: dict[str, Any],
 # # ) -> dict[str, Any]:
 # #     """
-# #     Apply an evidence.generated/evidence.failed event to an incident.
+# #     Apply an evidence.generated/evidence.failed event.
 
 # #     The incident_id is taken from:
 # #         event.context.incident_id
 
-# #     Completed evidence cannot later be downgraded by a stale failed
-# #     event.
+# #     Persists the complete evidence metadata:
+# #         - evidence_status
+# #         - evidence_type
+# #         - evidence_event_id
+# #         - proof_path
+# #         - proof_filename
+# #         - source_video
+# #         - start_time
+# #         - end_time
+# #         - evidence_duration
+# #         - evidence_reason
+# #         - evidence_updated_at
+
+# #     A completed evidence result cannot later be downgraded
+# #     by a stale failure event.
 # #     """
 
 # #     if not isinstance(event, dict):
@@ -919,79 +1094,78 @@
 # #             "Evidence event must be a dictionary"
 # #         )
 
-# #     validated_event = validate_event(
-# #         event
-# #     )
+# #     validated_event = validate_event(event)
 
-# #     event = validated_event.to_dict()
+# #     if hasattr(validated_event, "to_dict"):
+# #         event = validated_event.to_dict()
+# #     elif hasattr(validated_event, "model_dump"):
+# #         event = validated_event.model_dump(
+# #             mode="json"
+# #         )
+# #     elif isinstance(validated_event, dict):
+# #         event = validated_event
+# #     else:
+# #         raise ValueError(
+# #             "Validated event has unsupported type"
+# #         )
 
-# #     event_type = event.get(
-# #         "event_type"
-# #     )
+# #     event_type = event.get("event_type")
 
 # #     if event_type not in SUPPORTED_EVIDENCE_EVENT_TYPES:
 # #         raise ValueError(
 # #             f"Unsupported evidence event type: {event_type}"
 # #         )
 
-# #     context = event.get(
-# #         "context",
-# #         {},
-# #     )
+# #     context = event.get("context", {})
 
 # #     if not isinstance(context, dict):
 # #         context = {}
 
-# #     incident_id = context.get(
-# #         "incident_id"
-# #     )
+# #     incident_id = context.get("incident_id")
 
 # #     if not incident_id:
 # #         raise ValueError(
-# #             "Evidence event is missing context.incident_id"
+# #             "Evidence event is missing "
+# #             "context.incident_id"
 # #         )
 
-# #     data = event.get(
-# #         "data",
-# #         {},
-# #     )
+# #     data = event.get("data", {})
 
 # #     if not isinstance(data, dict):
 # #         raise ValueError(
 # #             "Evidence event data must be an object"
 # #         )
 
-# #     evidence_event_id = event.get(
-# #         "event_id"
-# #     )
+# #     evidence_event_id = event.get("event_id")
 
 # #     if not evidence_event_id:
 # #         raise ValueError(
 # #             "Evidence event is missing event_id"
 # #         )
 
+# #     # --------------------------------------------------------
+# #     # Determine final evidence status.
+# #     # --------------------------------------------------------
+
 # #     raw_status = str(
-# #         data.get(
-# #             "status",
-# #             "",
-# #         )
+# #         data.get("status", "")
 # #     ).strip().upper()
 
 # #     if event_type == "evidence.generated":
-
 # #         status = (
-# #             "COMPLETED"
-# #             if raw_status
-# #             not in {
+# #             "FAILED"
+# #             if raw_status in {
 # #                 "FAILED",
 # #                 "ERROR",
 # #             }
-# #             else "FAILED"
+# #             else "COMPLETED"
 # #         )
-
 # #     else:
-
 # #         status = "FAILED"
+
+# #     # --------------------------------------------------------
+# #     # Evidence metadata.
+# #     # --------------------------------------------------------
 
 # #     evidence_type = data.get(
 # #         "evidence_type"
@@ -1005,9 +1179,61 @@
 # #         "proof_filename"
 # #     )
 
-# #     evidence_duration = safe_float(
-# #         data.get("evidence_duration")
+# #     source_video = data.get(
+# #         "source_video"
 # #     )
+
+# #     # Evidence generator may emit either:
+# #     #
+# #     #   duration
+# #     #
+# #     # or:
+# #     #
+# #     #   evidence_duration
+# #     #
+# #     # Support both.
+
+# #     evidence_duration = safe_float(
+# #         data.get(
+# #             "evidence_duration"
+# #         )
+# #     )
+
+# #     if evidence_duration is None:
+# #         evidence_duration = safe_float(
+# #             data.get(
+# #                 "duration"
+# #             )
+# #         )
+
+# #     # --------------------------------------------------------
+# #     # Evidence start/end time.
+# #     #
+# #     # These are allowed to be either:
+# #     #   - ISO timestamps
+# #     #   - numeric video-relative values
+# #     #
+# #     # Store them as TEXT because the DB schema defines
+# #     # start_time/end_time as TEXT.
+# #     # --------------------------------------------------------
+
+# #     start_time = data.get(
+# #         "start_time"
+# #     )
+
+# #     end_time = data.get(
+# #         "end_time"
+# #     )
+
+# #     if start_time is not None:
+# #         start_time = str(start_time)
+
+# #     if end_time is not None:
+# #         end_time = str(end_time)
+
+# #     # --------------------------------------------------------
+# #     # Evidence failure reason.
+# #     # --------------------------------------------------------
 
 # #     evidence_reason = data.get(
 # #         "reason"
@@ -1018,6 +1244,11 @@
 # #             "error"
 # #         )
 
+# #     if evidence_reason is not None:
+# #         evidence_reason = str(
+# #             evidence_reason
+# #         )
+
 # #     now = datetime.now(
 # #         timezone.utc
 # #     ).isoformat()
@@ -1025,6 +1256,13 @@
 # #     conn = get_database_connection()
 
 # #     try:
+# #         # ----------------------------------------------------
+# #         # Explicit transaction.
+# #         # ----------------------------------------------------
+
+# #         conn.execute(
+# #             "BEGIN IMMEDIATE"
+# #         )
 
 # #         incident = conn.execute(
 # #             """
@@ -1032,8 +1270,12 @@
 # #                 incident_id,
 # #                 evidence_status,
 # #                 evidence_event_id,
+# #                 evidence_type,
 # #                 proof_path,
 # #                 proof_filename,
+# #                 source_video,
+# #                 start_time,
+# #                 end_time,
 # #                 evidence_duration,
 # #                 evidence_reason,
 # #                 evidence_updated_at
@@ -1044,40 +1286,41 @@
 # #         ).fetchone()
 
 # #         if not incident:
+# #             conn.rollback()
 # #             raise ValueError(
 # #                 f"Incident not found: {incident_id}"
 # #             )
-
-# #         duplicate = conn.execute(
-# #             """
-# #             SELECT incident_id
-# #             FROM incidents
-# #             WHERE evidence_event_id = ?
-# #             """,
-# #             (evidence_event_id,),
-# #         ).fetchone()
-
-# #         if duplicate:
-# #             return {
-# #                 "action": "DUPLICATE",
-# #                 "incident_id": incident_id,
-# #                 "evidence_event_id": evidence_event_id,
-# #                 "evidence_status": incident[
-# #                     "evidence_status"
-# #                 ],
-# #             }
 
 # #         current_status = str(
 # #             incident["evidence_status"]
 # #             or DEFAULT_EVIDENCE_STATUS
 # #         ).upper()
 
-# #         # Never downgrade a completed evidence result.
+# #         # ----------------------------------------------------
+# #         # Same evidence event already applied.
+# #         # ----------------------------------------------------
+
+# #         if (
+# #             incident["evidence_event_id"]
+# #             == evidence_event_id
+# #         ):
+# #             conn.commit()
+
+# #             return {
+# #                 "action": "DUPLICATE",
+# #                 "incident_id": incident_id,
+# #                 "evidence_event_id": evidence_event_id,
+# #                 "evidence_status": current_status,
+# #             }
+
+# #         # ----------------------------------------------------
+# #         # Never downgrade completed evidence.
+# #         # ----------------------------------------------------
+
 # #         if (
 # #             current_status == "COMPLETED"
 # #             and status == "FAILED"
 # #         ):
-
 # #             conn.execute(
 # #                 """
 # #                 UPDATE incidents
@@ -1099,19 +1342,62 @@
 # #                 "evidence_status": current_status,
 # #             }
 
+# #         # ----------------------------------------------------
+# #         # Apply complete evidence result.
+# #         #
+# #         # COALESCE preserves useful existing values if an
+# #         # incoming event omits optional metadata.
+# #         # ----------------------------------------------------
+
 # #         conn.execute(
 # #             """
 # #             UPDATE incidents
 # #             SET
 # #                 evidence_status = ?,
-# #                 evidence_type = ?,
+
+# #                 evidence_type = COALESCE(
+# #                     ?,
+# #                     evidence_type
+# #                 ),
+
 # #                 evidence_event_id = ?,
-# #                 proof_path = ?,
-# #                 proof_filename = ?,
-# #                 evidence_duration = ?,
+
+# #                 proof_path = COALESCE(
+# #                     ?,
+# #                     proof_path
+# #                 ),
+
+# #                 proof_filename = COALESCE(
+# #                     ?,
+# #                     proof_filename
+# #                 ),
+
+# #                 source_video = COALESCE(
+# #                     ?,
+# #                     source_video
+# #                 ),
+
+# #                 start_time = COALESCE(
+# #                     ?,
+# #                     start_time
+# #                 ),
+
+# #                 end_time = COALESCE(
+# #                     ?,
+# #                     end_time
+# #                 ),
+
+# #                 evidence_duration = COALESCE(
+# #                     ?,
+# #                     evidence_duration
+# #                 ),
+
 # #                 evidence_reason = ?,
+
 # #                 evidence_updated_at = ?,
+
 # #                 updated_at = ?
+
 # #             WHERE incident_id = ?
 # #             """,
 # #             (
@@ -1120,6 +1406,9 @@
 # #                 evidence_event_id,
 # #                 proof_path,
 # #                 proof_filename,
+# #                 source_video,
+# #                 start_time,
+# #                 end_time,
 # #                 evidence_duration,
 # #                 evidence_reason,
 # #                 now,
@@ -1135,12 +1424,23 @@
 # #             "incident_id": incident_id,
 # #             "evidence_event_id": evidence_event_id,
 # #             "evidence_status": status,
+# #             "evidence_type": evidence_type,
 # #             "proof_path": proof_path,
 # #             "proof_filename": proof_filename,
+# #             "source_video": source_video,
+# #             "start_time": start_time,
+# #             "end_time": end_time,
+# #             "evidence_duration": evidence_duration,
+# #             "evidence_reason": evidence_reason,
 # #         }
+
+# #     except Exception:
+# #         conn.rollback()
+# #         raise
 
 # #     finally:
 # #         conn.close()
+
 
 
 # # # ============================================================
@@ -1148,26 +1448,24 @@
 # # # ============================================================
 
 
-# # async def ensure_consumer_group(
-# #     stream_name: str = STREAM_NAME,
-# #     group_name: str = GROUP_NAME,
-# # ) -> None:
+# # async def ensure_evidence_consumer_group() -> None:
 # #     """
-# #     Ensure a Redis consumer group exists.
+# #     Ensure the evidence persistence consumer group exists.
 # #     """
 
 # #     try:
 
 # #         await redis_client.xgroup_create(
-# #             name=stream_name,
-# #             groupname=group_name,
+# #             name=EVIDENCE_STREAM_NAME,
+# #             groupname=EVIDENCE_GROUP_NAME,
 # #             id="0",
 # #             mkstream=True,
 # #         )
 
 # #         print(
-# #             f"[INCIDENT] Created consumer group "
-# #             f"{group_name} for {stream_name}"
+# #             "[INCIDENT] Created evidence consumer group "
+# #             f"{EVIDENCE_GROUP_NAME} for "
+# #             f"{EVIDENCE_STREAM_NAME}"
 # #         )
 
 # #     except Exception as exc:
@@ -1178,27 +1476,9 @@
 # #         raise
 
 
-# # async def ensure_evidence_consumer_group() -> None:
-# #     await ensure_consumer_group(
-# #         stream_name=EVIDENCE_STREAM_NAME,
-# #         group_name=EVIDENCE_GROUP_NAME,
-# #     )
-
-
 # # # ============================================================
-# # # ACK
+# # # EVIDENCE ACK
 # # # ============================================================
-
-
-# # async def acknowledge(
-# #     redis_id: str,
-# # ) -> None:
-
-# #     await redis_client.xack(
-# #         STREAM_NAME,
-# #         GROUP_NAME,
-# #         redis_id,
-# #     )
 
 
 # # async def acknowledge_evidence(
@@ -1221,20 +1501,29 @@
 # #     fields: Any,
 # # ) -> dict[str, Any]:
 
-# #     if not isinstance(fields, dict):
+# #     if not isinstance(
+# #         fields,
+# #         dict,
+# #     ):
 # #         return {}
 
 # #     normalized: dict[str, Any] = {}
 
 # #     for key, value in fields.items():
 
-# #         if isinstance(key, bytes):
+# #         if isinstance(
+# #             key,
+# #             bytes,
+# #         ):
 # #             key = key.decode(
 # #                 "utf-8",
 # #                 errors="replace",
 # #             )
 
-# #         if isinstance(value, bytes):
+# #         if isinstance(
+# #             value,
+# #             bytes,
+# #         ):
 # #             value = value.decode(
 # #                 "utf-8",
 # #                 errors="replace",
@@ -1262,14 +1551,22 @@
 # #             "Redis message missing event field"
 # #         )
 
-# #     if isinstance(raw_event, bytes):
+# #     if isinstance(
+# #         raw_event,
+# #         bytes,
+# #     ):
 # #         raw_event = raw_event.decode(
-# #             "utf-8"
+# #             "utf-8",
+# #             errors="replace",
 # #         )
 
-# #     if isinstance(raw_event, str):
+# #     if isinstance(
+# #         raw_event,
+# #         str,
+# #     ):
 
 # #         try:
+
 # #             event = json.loads(
 # #                 raw_event
 # #             )
@@ -1280,7 +1577,10 @@
 # #                 f"Invalid event JSON: {exc}"
 # #             ) from exc
 
-# #     elif isinstance(raw_event, dict):
+# #     elif isinstance(
+# #         raw_event,
+# #         dict,
+# #     ):
 
 # #         event = raw_event
 
@@ -1290,7 +1590,10 @@
 # #             "Redis event must be JSON string or object"
 # #         )
 
-# #     if not isinstance(event, dict):
+# #     if not isinstance(
+# #         event,
+# #         dict,
+# #     ):
 # #         raise ValueError(
 # #             "Canonical event must be an object"
 # #         )
@@ -1299,102 +1602,29 @@
 # #         event
 # #     )
 
-# #     return validated.to_dict()
+# #     if hasattr(
+# #         validated,
+# #         "to_dict",
+# #     ):
+# #         return validated.to_dict()
 
-
-# # # ============================================================
-# # # ALERT MESSAGE PROCESSING
-# # # ============================================================
-
-
-# # async def process_event(
-# #     redis_id: str,
-# #     fields: Any,
-# # ) -> None:
-# #     """
-# #     Process one alert Redis message.
-
-# #     Successful processing:
-# #         ACK
-
-# #     Processing/database failure:
-# #         DO NOT ACK
-
-# #     Invalid permanent canonical payload:
-# #         ACK to prevent an infinite poison-message loop.
-# #     """
-
-# #     try:
-
-# #         event = parse_event(
-# #             fields
+# #     if hasattr(
+# #         validated,
+# #         "model_dump",
+# #     ):
+# #         return validated.model_dump(
+# #             mode="json"
 # #         )
 
-# #         event_type = event.get(
-# #             "event_type"
-# #         )
+# #     if isinstance(
+# #         validated,
+# #         dict,
+# #     ):
+# #         return validated
 
-# #         if event_type != SUPPORTED_EVENT_TYPE:
-
-# #             print(
-# #                 "[INCIDENT] Unsupported event type; "
-# #                 f"ACKing redis_id={redis_id} "
-# #                 f"type={event_type}"
-# #             )
-
-# #             await acknowledge(
-# #                 redis_id
-# #             )
-
-# #             return
-
-# #         result = await asyncio.to_thread(
-# #             create_incident_sync,
-# #             event,
-# #         )
-
-# #         print(
-# #             "[INCIDENT] "
-# #             f"{result.get('action')} | "
-# #             f"Incident={result.get('incident_id')} | "
-# #             f"Alert={result.get('alert_type')} | "
-# #             f"Camera={result.get('camera_id')} | "
-# #             f"Severity={result.get('severity')}"
-# #         )
-
-# #         await acknowledge(
-# #             redis_id
-# #         )
-
-# #     except ValueError as exc:
-
-# #         print(
-# #             "[INCIDENT] Invalid alert message; "
-# #             f"ACKing redis_id={redis_id} | "
-# #             f"error={exc}"
-# #         )
-
-# #         await acknowledge(
-# #             redis_id
-# #         )
-
-# #     except asyncio.CancelledError:
-# #         raise
-
-# #     except Exception as exc:
-
-# #         print(
-# #             "[INCIDENT] Alert processing failed; "
-# #             f"redis_id={redis_id} | "
-# #             f"{type(exc).__name__}: {exc}"
-# #         )
-
-# #         # IMPORTANT:
-# #         # No ACK.
-# #         #
-# #         # Redis retains this message as pending so it can be
-# #         # recovered after the failure.
-# #         raise
+# #     raise ValueError(
+# #         "Validated event has unsupported type"
+# #     )
 
 
 # # # ============================================================
@@ -1408,6 +1638,15 @@
 # # ) -> None:
 # #     """
 # #     Process one evidence Redis message.
+
+# #     Permanent invalid payload:
+# #         ACK.
+
+# #     Successful update:
+# #         ACK.
+
+# #     Retryable processing failure:
+# #         NO ACK.
 # #     """
 
 # #     try:
@@ -1420,10 +1659,7 @@
 # #             "event_type"
 # #         )
 
-# #         if (
-# #             event_type
-# #             not in SUPPORTED_EVIDENCE_EVENT_TYPES
-# #         ):
+# #         if event_type not in SUPPORTED_EVIDENCE_EVENT_TYPES:
 
 # #             print(
 # #                 "[INCIDENT] Unsupported evidence event; "
@@ -1476,80 +1712,14 @@
 # #             f"{type(exc).__name__}: {exc}"
 # #         )
 
-# #         # Do not ACK.
+# #         # IMPORTANT:
+# #         #
+# #         # Do NOT ACK.
+# #         #
+# #         # Redis retains the message as pending so it can
+# #         # be recovered after failure.
+
 # #         raise
-
-
-# # # ============================================================
-# # # PENDING ALERT RECOVERY
-# # # ============================================================
-
-
-# # async def recover_pending_alerts() -> None:
-# #     """
-# #     Recover messages previously owned by this consumer.
-# #     """
-
-# #     while True:
-
-# #         try:
-
-# #             messages = await redis_client.xreadgroup(
-# #                 groupname=GROUP_NAME,
-# #                 consumername=CONSUMER_NAME,
-# #                 streams={
-# #                     STREAM_NAME: "0-0",
-# #                 },
-# #                 count=READ_COUNT,
-# #                 block=RECOVERY_BLOCK_MS,
-# #             )
-
-# #         except asyncio.CancelledError:
-# #             raise
-
-# #         except Exception as exc:
-
-# #             print(
-# #                 "[INCIDENT] Pending alert recovery read failed: "
-# #                 f"{type(exc).__name__}: {exc}"
-# #             )
-
-# #             return
-
-# #         if not messages:
-# #             return
-
-# #         processed = False
-
-# #         for (
-# #             stream_name,
-# #             stream_messages,
-# #         ) in messages:
-
-# #             for (
-# #                 redis_id,
-# #                 fields,
-# #             ) in stream_messages:
-
-# #                 processed = True
-
-# #                 try:
-
-# #                     await process_event(
-# #                         redis_id,
-# #                         fields,
-# #                     )
-
-# #                 except Exception as exc:
-
-# #                     print(
-# #                         "[INCIDENT] Pending alert still failed: "
-# #                         f"redis_id={redis_id} | "
-# #                         f"{type(exc).__name__}: {exc}"
-# #                     )
-
-# #         if not processed:
-# #             return
 
 
 # # # ============================================================
@@ -1582,7 +1752,8 @@
 # #         except Exception as exc:
 
 # #             print(
-# #                 "[INCIDENT] Pending evidence recovery read failed: "
+# #                 "[INCIDENT] Pending evidence recovery "
+# #                 "read failed: "
 # #                 f"{type(exc).__name__}: {exc}"
 # #             )
 
@@ -1594,7 +1765,7 @@
 # #         processed = False
 
 # #         for (
-# #             stream_name,
+# #             _stream_name,
 # #             stream_messages,
 # #         ) in messages:
 
@@ -1612,6 +1783,9 @@
 # #                         fields,
 # #                     )
 
+# #                 except asyncio.CancelledError:
+# #                     raise
+
 # #                 except Exception as exc:
 
 # #                     print(
@@ -1625,80 +1799,13 @@
 
 
 # # # ============================================================
-# # # STALE ALERT RECOVERY
-# # # ============================================================
-
-
-# # async def recover_stale_alerts() -> None:
-# #     """
-# #     Claim stale alert messages from failed Incident Agents.
-# #     """
-
-# #     try:
-
-# #         result = await redis_client.xautoclaim(
-# #             STREAM_NAME,
-# #             GROUP_NAME,
-# #             CONSUMER_NAME,
-# #             min_idle_time=PENDING_CLAIM_IDLE_MS,
-# #             start_id="0-0",
-# #             count=READ_COUNT,
-# #         )
-
-# #     except asyncio.CancelledError:
-# #         raise
-
-# #     except Exception as exc:
-
-# #         print(
-# #             "[INCIDENT] Alert XAUTOCLAIM failed: "
-# #             f"{type(exc).__name__}: {exc}"
-# #         )
-
-# #         return
-
-# #     if not result or len(result) < 2:
-# #         return
-
-# #     claimed = result[1]
-
-# #     if not claimed:
-# #         return
-
-# #     print(
-# #         "[INCIDENT] Recovered "
-# #         f"{len(claimed)} stale alert message(s)"
-# #     )
-
-# #     for (
-# #         redis_id,
-# #         fields,
-# #     ) in claimed:
-
-# #         try:
-
-# #             await process_event(
-# #                 redis_id,
-# #                 fields,
-# #             )
-
-# #         except Exception as exc:
-
-# #             print(
-# #                 "[INCIDENT] Recovered alert failed: "
-# #                 f"redis_id={redis_id} | "
-# #                 f"{type(exc).__name__}: {exc}"
-# #             )
-
-
-# # # ============================================================
 # # # STALE EVIDENCE RECOVERY
 # # # ============================================================
 
 
 # # async def recover_stale_evidence() -> None:
 # #     """
-# #     Claim stale evidence messages from failed Incident Agents.
+# #     Claim stale evidence messages from failed consumers.
 # #     """
 
 # #     try:
@@ -1749,6 +1856,9 @@
 # #                 fields,
 # #             )
 
+# #         except asyncio.CancelledError:
+# #             raise
+
 # #         except Exception as exc:
 
 # #             print(
@@ -1759,96 +1869,21 @@
 
 
 # # # ============================================================
-# # # ALERT CONSUMER LOOP
-# # # ============================================================
-
-
-# # async def alert_consumer_loop() -> None:
-# #     """
-# #     Main alert consumer loop.
-# #     """
-
-# #     await ensure_consumer_group()
-
-# #     await recover_pending_alerts()
-
-# #     print(
-# #         "[INCIDENT] Alert consumer loop started | "
-# #         f"stream={STREAM_NAME} | "
-# #         f"group={GROUP_NAME} | "
-# #         f"consumer={CONSUMER_NAME}"
-# #     )
-
-# #     while True:
-
-# #         await recover_stale_alerts()
-
-# #         try:
-
-# #             messages = await redis_client.xreadgroup(
-# #                 groupname=GROUP_NAME,
-# #                 consumername=CONSUMER_NAME,
-# #                 streams={
-# #                     STREAM_NAME: ">",
-# #                 },
-# #                 count=READ_COUNT,
-# #                 block=READ_BLOCK_MS,
-# #             )
-
-# #         except asyncio.CancelledError:
-# #             raise
-
-# #         except Exception as exc:
-
-# #             print(
-# #                 "[INCIDENT] Alert XREADGROUP failed: "
-# #                 f"{type(exc).__name__}: {exc}"
-# #             )
-
-# #             await asyncio.sleep(2)
-
-# #             continue
-
-# #         if not messages:
-# #             continue
-
-# #         for (
-# #             stream_name,
-# #             stream_messages,
-# #         ) in messages:
-
-# #             for (
-# #                 redis_id,
-# #                 fields,
-# #             ) in stream_messages:
-
-# #                 try:
-
-# #                     await process_event(
-# #                         redis_id,
-# #                         fields,
-# #                     )
-
-# #                 except asyncio.CancelledError:
-# #                     raise
-
-# #                 except Exception as exc:
-
-# #                     print(
-# #                         "[INCIDENT] Alert message remains pending: "
-# #                         f"redis_id={redis_id} | "
-# #                         f"{type(exc).__name__}: {exc}"
-# #                     )
-
-
-# # # ============================================================
 # # # EVIDENCE CONSUMER LOOP
 # # # ============================================================
 
 
 # # async def evidence_consumer_loop() -> None:
 # #     """
-# #     Main evidence consumer loop.
+# #     Main evidence persistence consumer loop.
+
+# #     This consumer owns:
+
+# #         events.evidence
+
+# #     It does NOT consume:
+
+# #         events.alerts
 # #     """
 
 # #     await ensure_evidence_consumer_group()
@@ -1888,7 +1923,9 @@
 # #                 f"{type(exc).__name__}: {exc}"
 # #             )
 
-# #             await asyncio.sleep(2)
+# #             await asyncio.sleep(
+# #                 CONSUMER_RESTART_DELAY_SECONDS
+# #             )
 
 # #             continue
 
@@ -1896,7 +1933,7 @@
 # #             continue
 
 # #         for (
-# #             stream_name,
+# #             _stream_name,
 # #             stream_messages,
 # #         ) in messages:
 
@@ -1925,118 +1962,89 @@
 
 
 # # # ============================================================
-# # # UNIFIED CONSUMER
+# # # UNIFIED CONSUMER SERVICE
 # # # ============================================================
 
 
 # # async def consume_events() -> None:
 # #     """
-# #     Run alert and evidence consumers independently.
+# #     Run the evidence persistence consumer.
 
-# #     A failure in one loop must not terminate the other.
+# #     IMPORTANT ARCHITECTURAL OWNERSHIP:
+
+# #         events.alerts
+# #             -> agents.incident.main
+
+# #         events.evidence
+# #             -> this module
+
+# #     Therefore this function intentionally does NOT start
+# #     an alert consumer.
 # #     """
 
-# #     ensure_incidents_table()
+# #     # --------------------------------------------------------
+# #     # Database initialization.
+# #     # --------------------------------------------------------
 
-# #     await ensure_consumer_group()
+# #     await asyncio.to_thread(
+# #         ensure_incidents_table
+# #     )
+
+# #     # --------------------------------------------------------
+# #     # Ensure evidence group.
+# #     # --------------------------------------------------------
 
 # #     await ensure_evidence_consumer_group()
 
-# #     alert_task = asyncio.create_task(
-# #         alert_consumer_loop(),
-# #         name="incident-alert-consumer",
-# #     )
+# #     # --------------------------------------------------------
+# #     # Start evidence persistence consumer.
+# #     # --------------------------------------------------------
 
 # #     evidence_task = asyncio.create_task(
 # #         evidence_consumer_loop(),
 # #         name="incident-evidence-consumer",
 # #     )
 
-# #     tasks = {
-# #         alert_task,
-# #         evidence_task,
-# #     }
-
 # #     print(
-# #         "[INCIDENT] Unified consumer service started."
+# #         "[INCIDENT] Evidence persistence service started."
 # #     )
 
 # #     try:
 
-# #         while True:
+# #         await evidence_task
 
-# #             done, _ = await asyncio.wait(
-# #                 tasks,
-# #                 return_when=asyncio.FIRST_COMPLETED,
-# #             )
+# #     except asyncio.CancelledError:
 
-# #             for task in done:
+# #         evidence_task.cancel()
 
-# #                 try:
+# #         await asyncio.gather(
+# #             evidence_task,
+# #             return_exceptions=True,
+# #         )
 
-# #                     task.result()
+# #         raise
 
-# #                 except asyncio.CancelledError:
+# #     except Exception as exc:
 
-# #                     if not task.cancelled():
-# #                         raise
+# #         print(
+# #             "[INCIDENT] Evidence consumer service failed: "
+# #             f"{type(exc).__name__}: {exc}"
+# #         )
 
-# #                 except Exception as exc:
-
-# #                     print(
-# #                         "[INCIDENT] Background consumer failed: "
-# #                         f"{task.get_name()} | "
-# #                         f"{type(exc).__name__}: {exc}"
-# #                     )
-
-# #                 if task is alert_task:
-
-# #                     print(
-# #                         "[INCIDENT] Restarting alert consumer loop."
-# #                     )
-
-# #                     alert_task = asyncio.create_task(
-# #                         alert_consumer_loop(),
-# #                         name="incident-alert-consumer",
-# #                     )
-
-# #                     tasks.add(
-# #                         alert_task
-# #                     )
-
-# #                 elif task is evidence_task:
-
-# #                     print(
-# #                         "[INCIDENT] Restarting evidence consumer loop."
-# #                     )
-
-# #                     evidence_task = asyncio.create_task(
-# #                         evidence_consumer_loop(),
-# #                         name="incident-evidence-consumer",
-# #                     )
-
-# #                     tasks.add(
-# #                         evidence_task
-# #                     )
-
-# #                 tasks.discard(
-# #                     task
-# #                 )
+# #         raise
 
 # #     finally:
 
-# #         for task in tasks:
-# #             task.cancel()
+# #         if not evidence_task.done():
+# #             evidence_task.cancel()
 
-# #         if tasks:
-
-# #             await asyncio.gather(
-# #                 *tasks,
-# #                 return_exceptions=True,
-# #             )
+# #         await asyncio.gather(
+# #             evidence_task,
+# #             return_exceptions=True,
+# #         )
 
 # #         print(
-# #             "[INCIDENT] Unified consumer service stopped."
+# #             "[INCIDENT] Evidence persistence service stopped."
 # #         )
 
 
@@ -2051,34 +2059,82 @@
 # #     )
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 # """
 # Reliable Redis Stream consumers and incident persistence.
 
 # Responsibilities
 # ----------------
-# - Consume canonical alert.created events from events.alerts.
+
+# - Provide canonical incident database persistence helpers.
 # - Create/update incidents in SQLite.
 # - Consume canonical evidence.generated/evidence.failed events.
 # - Link evidence results back to incidents.
 # - Validate canonical events before processing.
-# - ACK Redis messages only after successful processing.
-# - Recover pending messages after restart.
-# - Claim stale messages from failed consumers.
-# - Isolate malformed/failed messages.
+# - ACK Redis evidence messages only after successful processing.
+# - Recover pending evidence messages after restart.
+# - Claim stale evidence messages from failed consumers.
+# - Isolate malformed/failed evidence messages.
 
 # Non-responsibilities
 # --------------------
-# - API-facing stream queries.
+
+# - Consuming alert.created events.
+# - Alert -> incident orchestration.
 # - Agent supervision.
 # - Camera processing.
 # - Object detection.
 # - Evidence generation.
+# - API-facing Redis stream queries.
+
+# Alert -> incident orchestration belongs to:
+
+#     agents.incident.main
 
 # API-facing Redis event queries belong to:
+
 #     backend.app.messaging.event_consumer
 
-# Incident Agent entry point:
-#     agents.incident.main
+# Evidence generation belongs to:
+
+#     agents.evidence.main
 # """
 
 # from __future__ import annotations
@@ -2090,59 +2146,46 @@
 # import sqlite3
 # import uuid
 # from datetime import datetime, timezone
-# from pathlib import Path
 # from typing import Any
 
+# from backend.app.incidents.paths import incident_database_path
 # from backend.app.messaging.redis_client import redis_client
 # from shared.schemas.event_schema import validate_event
 
 
 # # ============================================================
-# # CONFIGURATION
+# # DATABASE CONFIGURATION
 # # ============================================================
 
-# STREAM_NAME = os.getenv(
-#     "INCIDENT_INPUT_STREAM",
-#     "events.alerts",
-# )
+# DATABASE_PATH = incident_database_path()
 
-# GROUP_NAME = os.getenv(
-#     "INCIDENT_GROUP",
-#     "incident-workers",
-# )
 
-# CONSUMER_NAME = os.getenv(
-#     "INCIDENT_CONSUMER_NAME",
-#     f"incident-{socket.gethostname()}-{uuid.uuid4().hex[:8]}",
-# )
+# # ============================================================
+# # EVIDENCE STREAM CONFIGURATION
+# # ============================================================
 
-# DATABASE_PATH = Path(
+# EVIDENCE_STREAM_NAME = (
 #     os.getenv(
-#         "INCIDENT_DATABASE",
-#         "data/incidents.db",
-#     )
+#         "INCIDENT_EVIDENCE_INPUT_STREAM",
+#         "events.evidence",
+#     ).strip()
+#     or "events.evidence"
 # )
 
-# SUPPORTED_EVENT_TYPE = "alert.created"
-
-
-# # ============================================================
-# # EVIDENCE CONFIGURATION
-# # ============================================================
-
-# EVIDENCE_STREAM_NAME = os.getenv(
-#     "INCIDENT_EVIDENCE_INPUT_STREAM",
-#     "events.evidence",
+# EVIDENCE_GROUP_NAME = (
+#     os.getenv(
+#         "INCIDENT_EVIDENCE_GROUP",
+#         "incident-evidence-workers",
+#     ).strip()
+#     or "incident-evidence-workers"
 # )
 
-# EVIDENCE_GROUP_NAME = os.getenv(
-#     "INCIDENT_EVIDENCE_GROUP",
-#     "incident-evidence-workers",
-# )
-
-# EVIDENCE_CONSUMER_NAME = os.getenv(
-#     "INCIDENT_EVIDENCE_CONSUMER_NAME",
-#     f"incident-evidence-{socket.gethostname()}-{uuid.uuid4().hex[:8]}",
+# EVIDENCE_CONSUMER_NAME = (
+#     os.getenv(
+#         "INCIDENT_EVIDENCE_CONSUMER_NAME",
+#         f"incident-evidence-{socket.gethostname()}-{uuid.uuid4().hex[:8]}",
+#     ).strip()
+#     or f"incident-evidence-{socket.gethostname()}-{uuid.uuid4().hex[:8]}"
 # )
 
 # SUPPORTED_EVIDENCE_EVENT_TYPES = {
@@ -2163,7 +2206,7 @@
 #     int(
 #         os.getenv(
 #             "INCIDENT_PENDING_CLAIM_IDLE_MS",
-#             "30000",
+#             "120000",
 #         )
 #     ),
 # )
@@ -2210,6 +2253,34 @@
 
 
 # # ============================================================
+# # INTERNAL EXCEPTIONS
+# # ============================================================
+
+
+# class RetryableEvidenceProcessingError(Exception):
+#     """
+#     Indicates that an evidence message should remain pending.
+
+#     Examples:
+
+#     - Incident has not been persisted yet.
+#     - Temporary database problem.
+#     - Temporary dependency failure.
+
+#     The Redis message must NOT be ACKed.
+#     """
+
+
+# class PermanentEvidenceMessageError(ValueError):
+#     """
+#     Indicates that an evidence message is permanently invalid.
+
+#     These messages may safely be ACKed so that malformed data does
+#     not poison the consumer indefinitely.
+#     """
+
+
+# # ============================================================
 # # DATABASE
 # # ============================================================
 
@@ -2219,7 +2290,10 @@
 #     Open a SQLite connection configured for concurrent workers.
 
 #     WAL allows readers and writers to coexist more effectively.
+
 #     busy_timeout reduces transient database-lock failures.
+
+#     foreign_keys enables SQLite foreign-key enforcement.
 #     """
 
 #     DATABASE_PATH.parent.mkdir(
@@ -2253,8 +2327,13 @@
 #     """
 #     Create or migrate the canonical incidents table.
 
-#     This is intentionally synchronous because callers may execute
-#     it through asyncio.to_thread().
+#     This function is synchronous intentionally.
+
+#     Async callers should use:
+
+#         await asyncio.to_thread(
+#             ensure_incidents_table
+#         )
 #     """
 
 #     conn = get_database_connection()
@@ -2265,36 +2344,25 @@
 #             CREATE TABLE IF NOT EXISTS incidents (
 #                 incident_id TEXT PRIMARY KEY,
 #                 alert_event_id TEXT UNIQUE NOT NULL,
-
 #                 event_id TEXT,
-
 #                 camera_id TEXT,
-
 #                 event_type TEXT NOT NULL,
 #                 alert_type TEXT NOT NULL,
 #                 severity TEXT NOT NULL,
 #                 mode TEXT,
-
 #                 trace_id TEXT,
 #                 correlation_id TEXT,
-
 #                 source_agent_id TEXT,
 #                 source_instance_id TEXT,
 #                 source_hostname TEXT,
 #                 source_redis_id TEXT,
-
 #                 person_count INTEGER,
 #                 threshold REAL,
-
 #                 frame_id INTEGER,
 #                 frame_timestamp REAL,
-
 #                 track_ids TEXT,
-
 #                 message TEXT,
-
 #                 status TEXT NOT NULL DEFAULT 'OPEN',
-
 #                 evidence_status TEXT NOT NULL DEFAULT 'PENDING',
 #                 evidence_type TEXT,
 #                 evidence_event_id TEXT,
@@ -2307,7 +2375,6 @@
 #                 evidence_duration REAL,
 #                 evidence_reason TEXT,
 #                 evidence_updated_at TEXT,
-
 #                 created_at TEXT NOT NULL,
 #                 updated_at TEXT NOT NULL
 #             )
@@ -2323,9 +2390,6 @@
 
 #         # --------------------------------------------------------
 #         # Safe additive migrations.
-#         #
-#         # New nullable columns are used for compatibility with
-#         # existing databases. Existing rows therefore remain valid.
 #         # --------------------------------------------------------
 
 #         migrations: dict[str, str] = {
@@ -2371,15 +2435,20 @@
 #                 )
 
 #         # --------------------------------------------------------
-#         # Backfill missing timestamps safely.
+#         # Backfill timestamps.
 #         # --------------------------------------------------------
 
-#         now = datetime.now(timezone.utc).isoformat()
+#         now = datetime.now(
+#             timezone.utc
+#         ).isoformat()
 
 #         conn.execute(
 #             """
 #             UPDATE incidents
-#             SET created_at = COALESCE(created_at, ?)
+#             SET created_at = COALESCE(
+#                 created_at,
+#                 ?
+#             )
 #             WHERE created_at IS NULL
 #             """,
 #             (now,),
@@ -2388,7 +2457,11 @@
 #         conn.execute(
 #             """
 #             UPDATE incidents
-#             SET updated_at = COALESCE(updated_at, created_at, ?)
+#             SET updated_at = COALESCE(
+#                 updated_at,
+#                 created_at,
+#                 ?
+#             )
 #             WHERE updated_at IS NULL
 #             """,
 #             (now,),
@@ -2397,10 +2470,12 @@
 #         conn.execute(
 #             """
 #             UPDATE incidents
-#             SET event_type = COALESCE(event_type, ?)
+#             SET event_type = COALESCE(
+#                 event_type,
+#                 'alert.created'
+#             )
 #             WHERE event_type IS NULL
-#             """,
-#             (SUPPORTED_EVENT_TYPE,),
+#             """
 #         )
 
 #         conn.execute(
@@ -2416,7 +2491,7 @@
 #         )
 
 #         # --------------------------------------------------------
-#         # Indexes
+#         # Indexes.
 #         # --------------------------------------------------------
 
 #         conn.execute(
@@ -2491,8 +2566,6 @@
 #             """
 #         )
 
-#         # Evidence event IDs are unique because one Redis event must
-#         # never be applied twice to two incidents.
 #         conn.execute(
 #             """
 #             CREATE UNIQUE INDEX IF NOT EXISTS
@@ -2519,17 +2592,23 @@
 #     """
 #     Parse an ISO timestamp and normalize it to UTC.
 
-#     Numeric values are intentionally not interpreted as wall-clock
-#     timestamps.
+#     Numeric values are intentionally not interpreted as
+#     wall-clock timestamps.
 #     """
 
 #     if value is None:
 #         return None
 
-#     if isinstance(value, datetime):
+#     if isinstance(
+#         value,
+#         datetime,
+#     ):
 #         dt = value
 
-#     elif isinstance(value, str):
+#     elif isinstance(
+#         value,
+#         str,
+#     ):
 #         value = value.strip()
 
 #         if not value:
@@ -2539,7 +2618,10 @@
 #             normalized = value
 
 #             if normalized.endswith("Z"):
-#                 normalized = normalized[:-1] + "+00:00"
+#                 normalized = (
+#                     normalized[:-1]
+#                     + "+00:00"
+#                 )
 
 #             dt = datetime.fromisoformat(
 #                 normalized
@@ -2570,13 +2652,15 @@
 #     Determine wall-clock event time.
 
 #     Priority:
+
 #         data.event_timestamp
 #         data.frame_datetime
 #         event.timestamp
 #         current UTC time
 
-#     Numeric frame_timestamp/event_time values are treated as
-#     video-relative values and are not converted to wall-clock time.
+#     Numeric frame_timestamp/event_time values are treated
+#     as video-relative values and are not converted to
+#     wall-clock timestamps.
 #     """
 
 #     data = event.get(
@@ -2584,7 +2668,10 @@
 #         {},
 #     )
 
-#     if isinstance(data, dict):
+#     if isinstance(
+#         data,
+#         dict,
+#     ):
 #         for key in (
 #             "event_timestamp",
 #             "frame_datetime",
@@ -2653,7 +2740,11 @@
 
 #     if isinstance(
 #         value,
-#         (list, tuple, set),
+#         (
+#             list,
+#             tuple,
+#             set,
+#         ),
 #     ):
 #         return [
 #             str(item)
@@ -2662,6 +2753,90 @@
 #         ]
 
 #     return [str(value)]
+
+
+# # ============================================================
+# # EVENT VALIDATION / NORMALIZATION
+# # ============================================================
+
+
+# def convert_validated_event(
+#     validated_event: Any,
+# ) -> dict[str, Any]:
+#     """
+#     Convert the result of validate_event() into a dictionary.
+
+#     Supports both older/custom validators and Pydantic-style
+#     model_dump().
+#     """
+
+#     if hasattr(
+#         validated_event,
+#         "to_dict",
+#     ):
+#         result = validated_event.to_dict()
+
+#     elif hasattr(
+#         validated_event,
+#         "model_dump",
+#     ):
+#         result = validated_event.model_dump(
+#             mode="json"
+#         )
+
+#     elif isinstance(
+#         validated_event,
+#         dict,
+#     ):
+#         result = validated_event
+
+#     else:
+#         raise PermanentEvidenceMessageError(
+#             "Validated event has unsupported type"
+#         )
+
+#     if not isinstance(
+#         result,
+#         dict,
+#     ):
+#         raise PermanentEvidenceMessageError(
+#             "Validated event is not an object"
+#         )
+
+#     return result
+
+
+# def validate_and_normalize_event(
+#     event: Any,
+# ) -> dict[str, Any]:
+#     """
+#     Validate and normalize a canonical event.
+
+#     Validation failures are considered permanent message
+#     failures and should be ACKed by the Redis consumer.
+#     """
+
+#     if not isinstance(
+#         event,
+#         dict,
+#     ):
+#         raise PermanentEvidenceMessageError(
+#             "Event must be a dictionary"
+#         )
+
+#     try:
+#         validated_event = validate_event(
+#             event
+#         )
+
+#     except Exception as exc:
+#         raise PermanentEvidenceMessageError(
+#             f"Event validation failed: {exc}"
+#         ) from exc
+
+#     return convert_validated_event(
+#         validated_event
+#     )
 
 
 # # ============================================================
@@ -2675,29 +2850,32 @@
 #     """
 #     Create an incident from a canonical alert.created event.
 
-#     Idempotency:
-#         alert_event_id is UNIQUE.
+#     This function is called by:
 
-#     If the same event is received again, the existing incident
-#     is returned instead of creating a duplicate.
+#         agents.incident.main
+
+#     It is NOT called by the Redis evidence consumer service.
+
+#     Idempotency is based on alert_event_id.
 #     """
 
-#     if not isinstance(event, dict):
+#     if not isinstance(
+#         event,
+#         dict,
+#     ):
 #         raise ValueError(
 #             "Event must be a dictionary"
 #         )
 
-#     validated_event = validate_event(
+#     event = validate_and_normalize_event(
 #         event
 #     )
-
-#     event = validated_event.to_dict()
 
 #     event_type = event.get(
 #         "event_type"
 #     )
 
-#     if event_type != SUPPORTED_EVENT_TYPE:
+#     if event_type != "alert.created":
 #         raise ValueError(
 #             f"Unsupported event type: {event_type}"
 #         )
@@ -2716,7 +2894,10 @@
 #         {},
 #     )
 
-#     if not isinstance(camera, dict):
+#     if not isinstance(
+#         camera,
+#         dict,
+#     ):
 #         camera = {}
 
 #     context = event.get(
@@ -2724,7 +2905,10 @@
 #         {},
 #     )
 
-#     if not isinstance(context, dict):
+#     if not isinstance(
+#         context,
+#         dict,
+#     ):
 #         context = {}
 
 #     data = event.get(
@@ -2732,7 +2916,10 @@
 #         {},
 #     )
 
-#     if not isinstance(data, dict):
+#     if not isinstance(
+#         data,
+#         dict,
+#     ):
 #         raise ValueError(
 #             "Alert event data must be an object"
 #         )
@@ -2742,7 +2929,10 @@
 #         {},
 #     )
 
-#     if not isinstance(source, dict):
+#     if not isinstance(
+#         source,
+#         dict,
+#     ):
 #         source = {}
 
 #     incident_id = (
@@ -2793,28 +2983,40 @@
 #     )
 
 #     person_count = safe_int(
-#         data.get("person_count")
+#         data.get(
+#             "person_count"
+#         )
 #     )
 
 #     threshold = safe_float(
-#         data.get("threshold")
+#         data.get(
+#             "threshold"
+#         )
 #     )
 
 #     frame_id = safe_int(
-#         data.get("frame_id")
+#         data.get(
+#             "frame_id"
+#         )
 #     )
 
 #     frame_timestamp = safe_float(
-#         data.get("frame_timestamp")
+#         data.get(
+#             "frame_timestamp"
+#         )
 #     )
 
 #     if frame_timestamp is None:
 #         frame_timestamp = safe_float(
-#             data.get("event_time")
+#             data.get(
+#                 "event_time"
+#             )
 #         )
 
 #     track_ids = normalize_track_ids(
-#         data.get("track_ids")
+#         data.get(
+#             "track_ids"
+#         )
 #     )
 
 #     message = data.get(
@@ -2841,7 +3043,7 @@
 
 #     try:
 #         # --------------------------------------------------------
-#         # First idempotency lookup.
+#         # Idempotency lookup.
 #         # --------------------------------------------------------
 
 #         existing = conn.execute(
@@ -2906,9 +3108,15 @@
 #                 "action": "UPDATED",
 #                 "incident_id": existing_incident_id,
 #                 "alert_event_id": event_id,
-#                 "camera_id": existing["camera_id"],
-#                 "alert_type": existing["alert_type"],
-#                 "severity": existing["severity"],
+#                 "camera_id": existing[
+#                     "camera_id"
+#                 ],
+#                 "alert_type": existing[
+#                     "alert_type"
+#                 ],
+#                 "severity": existing[
+#                     "severity"
+#                 ],
 #                 "person_count": person_count,
 #                 "evidence_status": existing[
 #                     "evidence_status"
@@ -2991,8 +3199,6 @@
 #             conn.commit()
 
 #         except sqlite3.IntegrityError:
-#             # Another worker may have inserted the same alert
-#             # concurrently.
 #             conn.rollback()
 
 #             existing = conn.execute(
@@ -3012,8 +3218,6 @@
 #             ).fetchone()
 
 #             if not existing:
-#                 # Could be a different constraint violation,
-#                 # e.g. incident_id collision.
 #                 raise
 
 #             return {
@@ -3064,31 +3268,53 @@
 #     Apply an evidence.generated/evidence.failed event.
 
 #     The incident_id is taken from:
+
 #         event.context.incident_id
 
-#     Evidence event IDs are unique.
+#     Persists the complete evidence metadata:
+
+#         - evidence_status
+#         - evidence_type
+#         - evidence_event_id
+#         - proof_path
+#         - proof_filename
+#         - source_video
+#         - start_time
+#         - end_time
+#         - evidence_duration
+#         - evidence_reason
+#         - evidence_updated_at
 
 #     A completed evidence result cannot later be downgraded
 #     by a stale failure event.
+
+#     IMPORTANT:
+
+#     If the incident does not yet exist, this function raises
+#     RetryableEvidenceProcessingError rather than ValueError.
+
+#     This prevents evidence from being ACKed and lost when
+#     incident persistence and evidence generation race each other.
 #     """
 
-#     if not isinstance(event, dict):
-#         raise ValueError(
+#     if not isinstance(
+#         event,
+#         dict,
+#     ):
+#         raise PermanentEvidenceMessageError(
 #             "Evidence event must be a dictionary"
 #         )
 
-#     validated_event = validate_event(
+#     event = validate_and_normalize_event(
 #         event
 #     )
-
-#     event = validated_event.to_dict()
 
 #     event_type = event.get(
 #         "event_type"
 #     )
 
 #     if event_type not in SUPPORTED_EVIDENCE_EVENT_TYPES:
-#         raise ValueError(
+#         raise PermanentEvidenceMessageError(
 #             f"Unsupported evidence event type: {event_type}"
 #         )
 
@@ -3097,7 +3323,10 @@
 #         {},
 #     )
 
-#     if not isinstance(context, dict):
+#     if not isinstance(
+#         context,
+#         dict,
+#     ):
 #         context = {}
 
 #     incident_id = context.get(
@@ -3105,8 +3334,9 @@
 #     )
 
 #     if not incident_id:
-#         raise ValueError(
-#             "Evidence event is missing context.incident_id"
+#         raise PermanentEvidenceMessageError(
+#             "Evidence event is missing "
+#             "context.incident_id"
 #         )
 
 #     data = event.get(
@@ -3114,8 +3344,11 @@
 #         {},
 #     )
 
-#     if not isinstance(data, dict):
-#         raise ValueError(
+#     if not isinstance(
+#         data,
+#         dict,
+#     ):
+#         raise PermanentEvidenceMessageError(
 #             "Evidence event data must be an object"
 #         )
 
@@ -3124,9 +3357,13 @@
 #     )
 
 #     if not evidence_event_id:
-#         raise ValueError(
+#         raise PermanentEvidenceMessageError(
 #             "Evidence event is missing event_id"
 #         )
+
+#     # --------------------------------------------------------
+#     # Determine final evidence status.
+#     # --------------------------------------------------------
 
 #     raw_status = str(
 #         data.get(
@@ -3138,7 +3375,8 @@
 #     if event_type == "evidence.generated":
 #         status = (
 #             "FAILED"
-#             if raw_status in {
+#             if raw_status
+#             in {
 #                 "FAILED",
 #                 "ERROR",
 #             }
@@ -3146,6 +3384,10 @@
 #         )
 #     else:
 #         status = "FAILED"
+
+#     # --------------------------------------------------------
+#     # Evidence metadata.
+#     # --------------------------------------------------------
 
 #     evidence_type = data.get(
 #         "evidence_type"
@@ -3159,9 +3401,52 @@
 #         "proof_filename"
 #     )
 
-#     evidence_duration = safe_float(
-#         data.get("evidence_duration")
+#     source_video = data.get(
+#         "source_video"
 #     )
+
+#     evidence_duration = safe_float(
+#         data.get(
+#             "evidence_duration"
+#         )
+#     )
+
+#     if evidence_duration is None:
+#         evidence_duration = safe_float(
+#             data.get(
+#                 "duration"
+#             )
+#         )
+
+#     # --------------------------------------------------------
+#     # Evidence start/end time.
+#     #
+#     # These are allowed to be either:
+#     #
+#     #   - ISO timestamps
+#     #   - numeric video-relative values
+#     #
+#     # Store them as TEXT because the DB schema defines
+#     # start_time/end_time as TEXT.
+#     # --------------------------------------------------------
+
+#     start_time = data.get(
+#         "start_time"
+#     )
+
+#     end_time = data.get(
+#         "end_time"
+#     )
+
+#     if start_time is not None:
+#         start_time = str(start_time)
+
+#     if end_time is not None:
+#         end_time = str(end_time)
+
+#     # --------------------------------------------------------
+#     # Evidence failure reason.
+#     # --------------------------------------------------------
 
 #     evidence_reason = data.get(
 #         "reason"
@@ -3172,6 +3457,11 @@
 #             "error"
 #         )
 
+#     if evidence_reason is not None:
+#         evidence_reason = str(
+#             evidence_reason
+#         )
+
 #     now = datetime.now(
 #         timezone.utc
 #     ).isoformat()
@@ -3179,12 +3469,13 @@
 #     conn = get_database_connection()
 
 #     try:
-#         # --------------------------------------------------------
-#         # Begin explicit transaction so the incident lookup,
-#         # duplicate check, and update are one atomic operation.
-#         # --------------------------------------------------------
+#         # ----------------------------------------------------
+#         # Explicit transaction.
+#         # ----------------------------------------------------
 
-#         conn.execute("BEGIN IMMEDIATE")
+#         conn.execute(
+#             "BEGIN IMMEDIATE"
+#         )
 
 #         incident = conn.execute(
 #             """
@@ -3192,8 +3483,12 @@
 #                 incident_id,
 #                 evidence_status,
 #                 evidence_event_id,
+#                 evidence_type,
 #                 proof_path,
 #                 proof_filename,
+#                 source_video,
+#                 start_time,
+#                 end_time,
 #                 evidence_duration,
 #                 evidence_reason,
 #                 evidence_updated_at
@@ -3203,11 +3498,20 @@
 #             (incident_id,),
 #         ).fetchone()
 
+#         # ----------------------------------------------------
+#         # IMPORTANT:
+#         #
+#         # Incident-not-found is retryable.
+#         #
+#         # Evidence generation and incident creation may race.
+#         # Do not ACK this message yet.
+#         # ----------------------------------------------------
+
 #         if not incident:
 #             conn.rollback()
 
-#             raise ValueError(
-#                 f"Incident not found: {incident_id}"
+#             raise RetryableEvidenceProcessingError(
+#                 f"Incident not found yet: {incident_id}"
 #             )
 
 #         current_status = str(
@@ -3215,9 +3519,9 @@
 #             or DEFAULT_EVIDENCE_STATUS
 #         ).upper()
 
-#         # --------------------------------------------------------
+#         # ----------------------------------------------------
 #         # Same evidence event already applied.
-#         # --------------------------------------------------------
+#         # ----------------------------------------------------
 
 #         if (
 #             incident["evidence_event_id"]
@@ -3232,9 +3536,9 @@
 #                 "evidence_status": current_status,
 #             }
 
-#         # --------------------------------------------------------
+#         # ----------------------------------------------------
 #         # Never downgrade completed evidence.
-#         # --------------------------------------------------------
+#         # ----------------------------------------------------
 
 #         if (
 #             current_status == "COMPLETED"
@@ -3243,7 +3547,8 @@
 #             conn.execute(
 #                 """
 #                 UPDATE incidents
-#                 SET updated_at = ?
+#                 SET
+#                     updated_at = ?
 #                 WHERE incident_id = ?
 #                 """,
 #                 (
@@ -3261,77 +3566,105 @@
 #                 "evidence_status": current_status,
 #             }
 
-#         # --------------------------------------------------------
-#         # Apply evidence result.
-#         # --------------------------------------------------------
+#         # ----------------------------------------------------
+#         # Apply complete evidence result.
+#         #
+#         # COALESCE preserves useful existing values if an
+#         # incoming event omits optional metadata.
+#         # ----------------------------------------------------
 
-#         try:
-#             conn.execute(
-#                 """
-#                 UPDATE incidents
-#                 SET
-#                     evidence_status = ?,
-#                     evidence_type = ?,
-#                     evidence_event_id = ?,
-#                     proof_path = ?,
-#                     proof_filename = ?,
-#                     evidence_duration = ?,
-#                     evidence_reason = ?,
-#                     evidence_updated_at = ?,
-#                     updated_at = ?
-#                 WHERE incident_id = ?
-#                 """,
-#                 (
-#                     status,
-#                     evidence_type,
-#                     evidence_event_id,
-#                     proof_path,
-#                     proof_filename,
-#                     evidence_duration,
-#                     evidence_reason,
-#                     now,
-#                     now,
-#                     incident_id,
+#         conn.execute(
+#             """
+#             UPDATE incidents
+#             SET
+#                 evidence_status = ?,
+
+#                 evidence_type = COALESCE(
+#                     ?,
+#                     evidence_type
 #                 ),
-#             )
 
-#             conn.commit()
+#                 evidence_event_id = ?,
 
-#         except sqlite3.IntegrityError:
-#             conn.rollback()
+#                 proof_path = COALESCE(
+#                     ?,
+#                     proof_path
+#                 ),
 
-#             # Another worker may have applied the same evidence event.
-#             existing = conn.execute(
-#                 """
-#                 SELECT
-#                     incident_id,
-#                     evidence_status
-#                 FROM incidents
-#                 WHERE evidence_event_id = ?
-#                 """,
-#                 (evidence_event_id,),
-#             ).fetchone()
+#                 proof_filename = COALESCE(
+#                     ?,
+#                     proof_filename
+#                 ),
 
-#             if existing:
-#                 return {
-#                     "action": "DUPLICATE",
-#                     "incident_id": incident_id,
-#                     "evidence_event_id": evidence_event_id,
-#                     "evidence_status": existing[
-#                         "evidence_status"
-#                     ],
-#                 }
+#                 source_video = COALESCE(
+#                     ?,
+#                     source_video
+#                 ),
 
-#             raise
+#                 start_time = COALESCE(
+#                     ?,
+#                     start_time
+#                 ),
+
+#                 end_time = COALESCE(
+#                     ?,
+#                     end_time
+#                 ),
+
+#                 evidence_duration = COALESCE(
+#                     ?,
+#                     evidence_duration
+#                 ),
+
+#                 evidence_reason = ?,
+
+#                 evidence_updated_at = ?,
+
+#                 updated_at = ?
+
+#             WHERE incident_id = ?
+#             """,
+#             (
+#                 status,
+#                 evidence_type,
+#                 evidence_event_id,
+#                 proof_path,
+#                 proof_filename,
+#                 source_video,
+#                 start_time,
+#                 end_time,
+#                 evidence_duration,
+#                 evidence_reason,
+#                 now,
+#                 now,
+#                 incident_id,
+#             ),
+#         )
+
+#         conn.commit()
 
 #         return {
 #             "action": "UPDATED",
 #             "incident_id": incident_id,
 #             "evidence_event_id": evidence_event_id,
 #             "evidence_status": status,
+#             "evidence_type": evidence_type,
 #             "proof_path": proof_path,
 #             "proof_filename": proof_filename,
+#             "source_video": source_video,
+#             "start_time": start_time,
+#             "end_time": end_time,
+#             "evidence_duration": evidence_duration,
+#             "evidence_reason": evidence_reason,
 #         }
+
+#     except RetryableEvidenceProcessingError:
+#         conn.rollback()
+#         raise
+
+#     except Exception:
+#         conn.rollback()
+#         raise
 
 #     finally:
 #         conn.close()
@@ -3342,25 +3675,23 @@
 # # ============================================================
 
 
-# async def ensure_consumer_group(
-#     stream_name: str = STREAM_NAME,
-#     group_name: str = GROUP_NAME,
-# ) -> None:
+# async def ensure_evidence_consumer_group() -> None:
 #     """
-#     Ensure a Redis consumer group exists.
+#     Ensure the evidence persistence consumer group exists.
 #     """
 
 #     try:
 #         await redis_client.xgroup_create(
-#             name=stream_name,
-#             groupname=group_name,
+#             name=EVIDENCE_STREAM_NAME,
+#             groupname=EVIDENCE_GROUP_NAME,
 #             id="0",
 #             mkstream=True,
 #         )
 
 #         print(
-#             f"[INCIDENT] Created consumer group "
-#             f"{group_name} for {stream_name}"
+#             "[INCIDENT] Created evidence consumer group "
+#             f"{EVIDENCE_GROUP_NAME} for "
+#             f"{EVIDENCE_STREAM_NAME}"
 #         )
 
 #     except Exception as exc:
@@ -3370,26 +3701,9 @@
 #         raise
 
 
-# async def ensure_evidence_consumer_group() -> None:
-#     await ensure_consumer_group(
-#         stream_name=EVIDENCE_STREAM_NAME,
-#         group_name=EVIDENCE_GROUP_NAME,
-#     )
-
-
 # # ============================================================
-# # ACK
+# # EVIDENCE ACK
 # # ============================================================
-
-
-# async def acknowledge(
-#     redis_id: str,
-# ) -> None:
-#     await redis_client.xack(
-#         STREAM_NAME,
-#         GROUP_NAME,
-#         redis_id,
-#     )
 
 
 # async def acknowledge_evidence(
@@ -3410,19 +3724,35 @@
 # def normalize_fields(
 #     fields: Any,
 # ) -> dict[str, Any]:
-#     if not isinstance(fields, dict):
+#     """
+#     Normalize Redis stream field keys and values.
+
+#     Redis clients may return bytes depending on configuration.
+#     """
+
+#     if not isinstance(
+#         fields,
+#         dict,
+#     ):
 #         return {}
 
 #     normalized: dict[str, Any] = {}
 
 #     for key, value in fields.items():
-#         if isinstance(key, bytes):
+
+#         if isinstance(
+#             key,
+#             bytes,
+#         ):
 #             key = key.decode(
 #                 "utf-8",
 #                 errors="replace",
 #             )
 
-#         if isinstance(value, bytes):
+#         if isinstance(
+#             value,
+#             bytes,
+#         ):
 #             value = value.decode(
 #                 "utf-8",
 #                 errors="replace",
@@ -3436,6 +3766,10 @@
 # def parse_event(
 #     fields: Any,
 # ) -> dict[str, Any]:
+#     """
+#     Parse a Redis stream message into a canonical validated event.
+#     """
+
 #     normalized = normalize_fields(
 #         fields
 #     )
@@ -3445,140 +3779,55 @@
 #     )
 
 #     if raw_event is None:
-#         raise ValueError(
+#         raise PermanentEvidenceMessageError(
 #             "Redis message missing event field"
 #         )
 
-#     if isinstance(raw_event, bytes):
+#     if isinstance(
+#         raw_event,
+#         bytes,
+#     ):
 #         raw_event = raw_event.decode(
 #             "utf-8",
 #             errors="replace",
 #         )
 
-#     if isinstance(raw_event, str):
+#     if isinstance(
+#         raw_event,
+#         str,
+#     ):
 #         try:
 #             event = json.loads(
 #                 raw_event
 #             )
 
 #         except json.JSONDecodeError as exc:
-#             raise ValueError(
+#             raise PermanentEvidenceMessageError(
 #                 f"Invalid event JSON: {exc}"
 #             ) from exc
 
-#     elif isinstance(raw_event, dict):
+#     elif isinstance(
+#         raw_event,
+#         dict,
+#     ):
 #         event = raw_event
 
 #     else:
-#         raise ValueError(
+#         raise PermanentEvidenceMessageError(
 #             "Redis event must be JSON string or object"
 #         )
 
-#     if not isinstance(event, dict):
-#         raise ValueError(
+#     if not isinstance(
+#         event,
+#         dict,
+#     ):
+#         raise PermanentEvidenceMessageError(
 #             "Canonical event must be an object"
 #         )
 
-#     validated = validate_event(
+#     return validate_and_normalize_event(
 #         event
 #     )
-
-#     return validated.to_dict()
-
-
-# # ============================================================
-# # ALERT MESSAGE PROCESSING
-# # ============================================================
-
-
-# async def process_event(
-#     redis_id: str,
-#     fields: Any,
-# ) -> None:
-#     """
-#     Process one alert Redis message.
-
-#     Permanent invalid/unsupported message:
-#         ACK.
-
-#     Successful processing:
-#         ACK.
-
-#     Retryable processing/database failure:
-#         NO ACK.
-
-#     This preserves at-least-once processing.
-#     """
-
-#     try:
-#         event = parse_event(
-#             fields
-#         )
-
-#         event_type = event.get(
-#             "event_type"
-#         )
-
-#         if event_type != SUPPORTED_EVENT_TYPE:
-#             print(
-#                 "[INCIDENT] Unsupported event type; "
-#                 f"ACKing redis_id={redis_id} "
-#                 f"type={event_type}"
-#             )
-
-#             await acknowledge(
-#                 redis_id
-#             )
-
-#             return
-
-#         result = await asyncio.to_thread(
-#             create_incident_sync,
-#             event,
-#         )
-
-#         print(
-#             "[INCIDENT] "
-#             f"{result.get('action')} | "
-#             f"Incident={result.get('incident_id')} | "
-#             f"Alert={result.get('alert_type')} | "
-#             f"Camera={result.get('camera_id')} | "
-#             f"Severity={result.get('severity')}"
-#         )
-
-#         await acknowledge(
-#             redis_id
-#         )
-
-#     except ValueError as exc:
-#         # Canonical validation errors and unsupported event types
-#         # are permanent from this consumer's perspective.
-#         print(
-#             "[INCIDENT] Invalid alert message; "
-#             f"ACKing redis_id={redis_id} | "
-#             f"error={exc}"
-#         )
-
-#         await acknowledge(
-#             redis_id
-#         )
-
-#     except asyncio.CancelledError:
-#         raise
-
-#     except Exception as exc:
-#         # IMPORTANT:
-#         # Do NOT ACK unexpected processing/database failures.
-#         #
-#         # Redis retains the message as pending so it can be
-#         # recovered after failure.
-#         print(
-#             "[INCIDENT] Alert processing failed; "
-#             f"redis_id={redis_id} | "
-#             f"{type(exc).__name__}: {exc}"
-#         )
-
-#         raise
 
 
 # # ============================================================
@@ -3596,10 +3845,16 @@
 #     Permanent invalid payload:
 #         ACK.
 
+#     Unsupported event type:
+#         ACK.
+
 #     Successful update:
 #         ACK.
 
 #     Retryable processing failure:
+#         NO ACK.
+
+#     Unexpected processing failure:
 #         NO ACK.
 #     """
 
@@ -3641,9 +3896,9 @@
 #             redis_id
 #         )
 
-#     except ValueError as exc:
+#     except PermanentEvidenceMessageError as exc:
 #         print(
-#             "[INCIDENT] Invalid evidence message; "
+#             "[INCIDENT] Permanent invalid evidence message; "
 #             f"ACKing redis_id={redis_id} | "
 #             f"error={exc}"
 #         )
@@ -3651,6 +3906,38 @@
 #         await acknowledge_evidence(
 #             redis_id
 #         )
+
+#     except RetryableEvidenceProcessingError as exc:
+#         print(
+#             "[INCIDENT] Retryable evidence processing failure; "
+#             f"redis_id={redis_id} | "
+#             f"error={exc}"
+#         )
+
+#         # IMPORTANT:
+#         #
+#         # Do NOT ACK.
+#         #
+#         # Redis retains the message as pending so it can be
+#         # retried/recovered later.
+#         return
+
+#     except ValueError as exc:
+#         # Defensive fallback.
+#         #
+#         # A ValueError that escapes normal permanent-message
+#         # handling is treated as a processing failure rather
+#         # than automatically ACKed.
+#         #
+#         # This is safer for reliability because ACK means:
+#         # "the message has been successfully handled."
+#         print(
+#             "[INCIDENT] Evidence processing ValueError; "
+#             f"redis_id={redis_id} | "
+#             f"error={exc}"
+#         )
+
+#         return
 
 #     except asyncio.CancelledError:
 #         raise
@@ -3662,84 +3949,13 @@
 #             f"{type(exc).__name__}: {exc}"
 #         )
 
-#         # Do not ACK.
-#         raise
-
-
-# # ============================================================
-# # PENDING ALERT RECOVERY
-# # ============================================================
-
-
-# async def recover_pending_alerts() -> None:
-#     """
-#     Recover messages previously owned by this consumer.
-
-#     Redis ID 0-0 means:
-#         messages currently pending for this consumer.
-
-#     It does NOT claim pending messages owned by other consumers.
-#     Those are handled by XAUTOCLAIM.
-#     """
-
-#     while True:
-#         try:
-#             messages = await redis_client.xreadgroup(
-#                 groupname=GROUP_NAME,
-#                 consumername=CONSUMER_NAME,
-#                 streams={
-#                     STREAM_NAME: "0-0",
-#                 },
-#                 count=READ_COUNT,
-#                 block=RECOVERY_BLOCK_MS,
-#             )
-
-#         except asyncio.CancelledError:
-#             raise
-
-#         except Exception as exc:
-#             print(
-#                 "[INCIDENT] Pending alert recovery read failed: "
-#                 f"{type(exc).__name__}: {exc}"
-#             )
-
-#             return
-
-#         if not messages:
-#             return
-
-#         processed = False
-
-#         for (
-#             _stream_name,
-#             stream_messages,
-#         ) in messages:
-
-#             for (
-#                 redis_id,
-#                 fields,
-#             ) in stream_messages:
-
-#                 processed = True
-
-#                 try:
-#                     await process_event(
-#                         redis_id,
-#                         fields,
-#                     )
-
-#                 except asyncio.CancelledError:
-#                     raise
-
-#                 except Exception as exc:
-#                     print(
-#                         "[INCIDENT] Pending alert still failed: "
-#                         f"redis_id={redis_id} | "
-#                         f"{type(exc).__name__}: {exc}"
-#                     )
-
-#         if not processed:
-#             return
+#         # IMPORTANT:
+#         #
+#         # Do NOT ACK.
+#         #
+#         # Redis retains the message as pending so it can be
+#         # recovered after failure.
+#         return
 
 
 # # ============================================================
@@ -3750,6 +3966,9 @@
 # async def recover_pending_evidence() -> None:
 #     """
 #     Recover evidence messages previously owned by this consumer.
+
+#     XREADGROUP with ID 0-0 reads pending messages assigned to
+#     this consumer.
 #     """
 
 #     while True:
@@ -3769,7 +3988,8 @@
 
 #         except Exception as exc:
 #             print(
-#                 "[INCIDENT] Pending evidence recovery read failed: "
+#                 "[INCIDENT] Pending evidence recovery "
+#                 "read failed: "
 #                 f"{type(exc).__name__}: {exc}"
 #             )
 
@@ -3813,79 +4033,16 @@
 
 
 # # ============================================================
-# # STALE ALERT RECOVERY
-# # ============================================================
-
-
-# async def recover_stale_alerts() -> None:
-#     """
-#     Claim stale alert messages from failed Incident consumers.
-#     """
-
-#     try:
-#         result = await redis_client.xautoclaim(
-#             STREAM_NAME,
-#             GROUP_NAME,
-#             CONSUMER_NAME,
-#             min_idle_time=PENDING_CLAIM_IDLE_MS,
-#             start_id="0-0",
-#             count=READ_COUNT,
-#         )
-
-#     except asyncio.CancelledError:
-#         raise
-
-#     except Exception as exc:
-#         print(
-#             "[INCIDENT] Alert XAUTOCLAIM failed: "
-#             f"{type(exc).__name__}: {exc}"
-#         )
-
-#         return
-
-#     if not result or len(result) < 2:
-#         return
-
-#     claimed = result[1]
-
-#     if not claimed:
-#         return
-
-#     print(
-#         "[INCIDENT] Recovered "
-#         f"{len(claimed)} stale alert message(s)"
-#     )
-
-#     for (
-#         redis_id,
-#         fields,
-#     ) in claimed:
-
-#         try:
-#             await process_event(
-#                 redis_id,
-#                 fields,
-#             )
-
-#         except asyncio.CancelledError:
-#             raise
-
-#         except Exception as exc:
-#             print(
-#                 "[INCIDENT] Recovered alert failed: "
-#                 f"redis_id={redis_id} | "
-#                 f"{type(exc).__name__}: {exc}"
-#             )
-
-
-# # ============================================================
 # # STALE EVIDENCE RECOVERY
 # # ============================================================
 
 
 # async def recover_stale_evidence() -> None:
 #     """
-#     Claim stale evidence messages from failed Incident consumers.
+#     Claim stale evidence messages from failed consumers.
+
+#     XAUTOCLAIM transfers ownership of messages whose pending
+#     idle time exceeds PENDING_CLAIM_IDLE_MS.
 #     """
 
 #     try:
@@ -3911,6 +4068,17 @@
 
 #     if not result or len(result) < 2:
 #         return
+
+#     # redis-py returns:
+#     #
+#     # (
+#     #     next_start_id,
+#     #     messages,
+#     #     deleted_ids,
+#     # )
+#     #
+#     # Older versions may omit deleted_ids, but messages remain
+#     # at index 1.
 
 #     claimed = result[1]
 
@@ -3945,93 +4113,21 @@
 
 
 # # ============================================================
-# # ALERT CONSUMER LOOP
-# # ============================================================
-
-
-# async def alert_consumer_loop() -> None:
-#     """
-#     Main alert consumer loop.
-#     """
-
-#     await ensure_consumer_group()
-
-#     await recover_pending_alerts()
-
-#     print(
-#         "[INCIDENT] Alert consumer loop started | "
-#         f"stream={STREAM_NAME} | "
-#         f"group={GROUP_NAME} | "
-#         f"consumer={CONSUMER_NAME}"
-#     )
-
-#     while True:
-#         await recover_stale_alerts()
-
-#         try:
-#             messages = await redis_client.xreadgroup(
-#                 groupname=GROUP_NAME,
-#                 consumername=CONSUMER_NAME,
-#                 streams={
-#                     STREAM_NAME: ">",
-#                 },
-#                 count=READ_COUNT,
-#                 block=READ_BLOCK_MS,
-#             )
-
-#         except asyncio.CancelledError:
-#             raise
-
-#         except Exception as exc:
-#             print(
-#                 "[INCIDENT] Alert XREADGROUP failed: "
-#                 f"{type(exc).__name__}: {exc}"
-#             )
-
-#             await asyncio.sleep(
-#                 CONSUMER_RESTART_DELAY_SECONDS
-#             )
-
-#             continue
-
-#         if not messages:
-#             continue
-
-#         for (
-#             _stream_name,
-#             stream_messages,
-#         ) in messages:
-
-#             for (
-#                 redis_id,
-#                 fields,
-#             ) in stream_messages:
-
-#                 try:
-#                     await process_event(
-#                         redis_id,
-#                         fields,
-#                     )
-
-#                 except asyncio.CancelledError:
-#                     raise
-
-#                 except Exception as exc:
-#                     print(
-#                         "[INCIDENT] Alert message remains pending: "
-#                         f"redis_id={redis_id} | "
-#                         f"{type(exc).__name__}: {exc}"
-#                     )
-
-
-# # ============================================================
 # # EVIDENCE CONSUMER LOOP
 # # ============================================================
 
 
 # async def evidence_consumer_loop() -> None:
 #     """
-#     Main evidence consumer loop.
+#     Main evidence persistence consumer loop.
+
+#     This consumer owns:
+
+#         events.evidence
+
+#     It does NOT consume:
+
+#         events.alerts
 #     """
 
 #     await ensure_evidence_consumer_group()
@@ -4046,7 +4142,16 @@
 #     )
 
 #     while True:
+
+#         # ----------------------------------------------------
+#         # Recover stale messages from failed consumers.
+#         # ----------------------------------------------------
+
 #         await recover_stale_evidence()
+
+#         # ----------------------------------------------------
+#         # Read new evidence messages.
+#         # ----------------------------------------------------
 
 #         try:
 #             messages = await redis_client.xreadgroup(
@@ -4105,125 +4210,85 @@
 
 
 # # ============================================================
-# # UNIFIED CONSUMER
+# # UNIFIED CONSUMER SERVICE
 # # ============================================================
 
 
 # async def consume_events() -> None:
 #     """
-#     Run alert and evidence consumers independently.
+#     Run the evidence persistence consumer.
 
-#     A failure in one loop must not terminate the other.
+#     IMPORTANT ARCHITECTURAL OWNERSHIP:
+
+#         events.alerts
+#             -> agents.incident.main
+
+#         events.evidence
+#             -> this module
+
+#     Therefore this function intentionally does NOT start
+#     an alert consumer.
 #     """
 
-#     # Database initialization happens before consumers start.
-#     #
-#     # This is synchronous because it is a startup operation.
-#     # It does not run continuously inside the event loop.
+#     # --------------------------------------------------------
+#     # Database initialization.
+#     # --------------------------------------------------------
+
 #     await asyncio.to_thread(
 #         ensure_incidents_table
 #     )
 
-#     await ensure_consumer_group()
+#     # --------------------------------------------------------
+#     # Ensure evidence group.
+#     # --------------------------------------------------------
 
 #     await ensure_evidence_consumer_group()
 
-#     alert_task = asyncio.create_task(
-#         alert_consumer_loop(),
-#         name="incident-alert-consumer",
-#     )
+#     # --------------------------------------------------------
+#     # Start evidence persistence consumer.
+#     # --------------------------------------------------------
 
 #     evidence_task = asyncio.create_task(
 #         evidence_consumer_loop(),
 #         name="incident-evidence-consumer",
 #     )
 
-#     tasks: set[asyncio.Task[Any]] = {
-#         alert_task,
-#         evidence_task,
-#     }
-
 #     print(
-#         "[INCIDENT] Unified consumer service started."
+#         "[INCIDENT] Evidence persistence service started."
 #     )
 
 #     try:
-#         while True:
-#             done, _ = await asyncio.wait(
-#                 tasks,
-#                 return_when=asyncio.FIRST_COMPLETED,
-#             )
+#         await evidence_task
 
-#             for task in done:
-#                 try:
-#                     task.result()
+#     except asyncio.CancelledError:
+#         evidence_task.cancel()
 
-#                 except asyncio.CancelledError:
-#                     if not task.cancelled():
-#                         raise
+#         await asyncio.gather(
+#             evidence_task,
+#             return_exceptions=True,
+#         )
 
-#                 except Exception as exc:
-#                     print(
-#                         "[INCIDENT] Background consumer failed: "
-#                         f"{task.get_name()} | "
-#                         f"{type(exc).__name__}: {exc}"
-#                     )
+#         raise
 
-#                 # ------------------------------------------------
-#                 # Replace only the failed/completed task.
-#                 # The other consumer continues untouched.
-#                 # ------------------------------------------------
+#     except Exception as exc:
+#         print(
+#             "[INCIDENT] Evidence consumer service failed: "
+#             f"{type(exc).__name__}: {exc}"
+#         )
 
-#                 if task is alert_task:
-#                     print(
-#                         "[INCIDENT] Restarting alert consumer loop."
-#                     )
-
-#                     alert_task = asyncio.create_task(
-#                         alert_consumer_loop(),
-#                         name="incident-alert-consumer",
-#                     )
-
-#                     tasks.add(
-#                         alert_task
-#                     )
-
-#                 elif task is evidence_task:
-#                     print(
-#                         "[INCIDENT] Restarting evidence consumer loop."
-#                     )
-
-#                     evidence_task = asyncio.create_task(
-#                         evidence_consumer_loop(),
-#                         name="incident-evidence-consumer",
-#                     )
-
-#                     tasks.add(
-#                         evidence_task
-#                     )
-
-#                 tasks.discard(
-#                     task
-#                 )
-
-#                 # Prevent an immediate restart storm if the newly
-#                 # created consumer repeatedly fails during startup.
-#                 await asyncio.sleep(
-#                     CONSUMER_RESTART_DELAY_SECONDS
-#                 )
+#         raise
 
 #     finally:
-#         for task in tasks:
-#             task.cancel()
+#         if not evidence_task.done():
+#             evidence_task.cancel()
 
-#         if tasks:
-#             await asyncio.gather(
-#                 *tasks,
-#                 return_exceptions=True,
-#             )
+#         await asyncio.gather(
+#             evidence_task,
+#             return_exceptions=True,
+#         )
 
 #         print(
-#             "[INCIDENT] Unified consumer service stopped."
+#             "[INCIDENT] Evidence persistence service stopped."
 #         )
 
 
@@ -4236,6 +4301,10 @@
 #     asyncio.run(
 #         consume_events()
 #     )
+
+
+
+
 
 
 
@@ -4307,7 +4376,6 @@ import socket
 import sqlite3
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 from backend.app.incidents.paths import incident_database_path
@@ -4321,26 +4389,49 @@ from shared.schemas.event_schema import validate_event
 
 DATABASE_PATH = incident_database_path()
 
+STREAM_NAME = (
+    os.getenv(
+        "ALERT_INPUT_STREAM",
+        "events.alerts",
+    ).strip()
+    or "events.alerts"
+)
+
+GROUP_NAME = (
+    os.getenv(
+        "ALERT_CONSUMER_GROUP",
+        "incident-workers",
+    ).strip()
+    or "incident-workers"
+)
+
 
 # ============================================================
 # EVIDENCE STREAM CONFIGURATION
 # ============================================================
 
-EVIDENCE_STREAM_NAME = os.getenv(
-    "INCIDENT_EVIDENCE_INPUT_STREAM",
-    "events.evidence",
-).strip() or "events.evidence"
+EVIDENCE_STREAM_NAME = (
+    os.getenv(
+        "INCIDENT_EVIDENCE_INPUT_STREAM",
+        "events.evidence",
+    ).strip()
+    or "events.evidence"
+)
 
-EVIDENCE_GROUP_NAME = os.getenv(
-    "INCIDENT_EVIDENCE_GROUP",
-    "incident-evidence-workers",
-).strip() or "incident-evidence-workers"
+EVIDENCE_GROUP_NAME = (
+    os.getenv(
+        "INCIDENT_EVIDENCE_GROUP",
+        "incident-evidence-workers",
+    ).strip()
+    or "incident-evidence-workers"
+)
 
-EVIDENCE_CONSUMER_NAME = os.getenv(
-    "INCIDENT_EVIDENCE_CONSUMER_NAME",
-    f"incident-evidence-{socket.gethostname()}-{uuid.uuid4().hex[:8]}",
-).strip() or (
-    f"incident-evidence-{socket.gethostname()}-{uuid.uuid4().hex[:8]}"
+EVIDENCE_CONSUMER_NAME = (
+    os.getenv(
+        "INCIDENT_EVIDENCE_CONSUMER_NAME",
+        f"incident-evidence-{socket.gethostname()}-{uuid.uuid4().hex[:8]}",
+    ).strip()
+    or f"incident-evidence-{socket.gethostname()}-{uuid.uuid4().hex[:8]}"
 )
 
 SUPPORTED_EVIDENCE_EVENT_TYPES = {
@@ -4408,6 +4499,34 @@ CONSUMER_RESTART_DELAY_SECONDS = max(
 
 
 # ============================================================
+# INTERNAL EXCEPTIONS
+# ============================================================
+
+
+class RetryableEvidenceProcessingError(Exception):
+    """
+    Indicates that an evidence message should remain pending.
+
+    Examples:
+
+    - Incident has not been persisted yet.
+    - Temporary database problem.
+    - Temporary dependency failure.
+
+    The Redis message must NOT be ACKed.
+    """
+
+
+class PermanentEvidenceMessageError(ValueError):
+    """
+    Indicates that an evidence message is permanently invalid.
+
+    These messages may safely be ACKed so malformed data does
+    not poison the consumer indefinitely.
+    """
+
+
+# ============================================================
 # DATABASE
 # ============================================================
 
@@ -4417,8 +4536,8 @@ def get_database_connection() -> sqlite3.Connection:
     Open a SQLite connection configured for concurrent workers.
 
     WAL allows readers and writers to coexist more effectively.
-
     busy_timeout reduces transient database-lock failures.
+    foreign_keys enables SQLite foreign-key enforcement.
     """
 
     DATABASE_PATH.parent.mkdir(
@@ -4483,7 +4602,7 @@ def ensure_incidents_table() -> None:
                 source_redis_id TEXT,
                 person_count INTEGER,
                 threshold REAL,
-                frame_id INTEGER,
+                frame_id TEXT,
                 frame_timestamp REAL,
                 track_ids TEXT,
                 message TEXT,
@@ -4530,7 +4649,7 @@ def ensure_incidents_table() -> None:
             "source_redis_id": "TEXT",
             "person_count": "INTEGER",
             "threshold": "REAL",
-            "frame_id": "INTEGER",
+            "frame_id": "TEXT",
             "frame_timestamp": "REAL",
             "track_ids": "TEXT",
             "message": "TEXT",
@@ -4724,10 +4843,16 @@ def parse_timestamp(
     if value is None:
         return None
 
-    if isinstance(value, datetime):
+    if isinstance(
+        value,
+        datetime,
+    ):
         dt = value
 
-    elif isinstance(value, str):
+    elif isinstance(
+        value,
+        str,
+    ):
         value = value.strip()
 
         if not value:
@@ -4787,7 +4912,10 @@ def get_event_time(
         {},
     )
 
-    if isinstance(data, dict):
+    if isinstance(
+        data,
+        dict,
+    ):
         for key in (
             "event_timestamp",
             "frame_datetime",
@@ -4875,6 +5003,90 @@ def normalize_track_ids(
 
 
 # ============================================================
+# EVENT VALIDATION / NORMALIZATION
+# ============================================================
+
+
+def convert_validated_event(
+    validated_event: Any,
+) -> dict[str, Any]:
+    """
+    Convert the result of validate_event() into a dictionary.
+
+    Supports both older/custom validators and Pydantic-style
+    model_dump().
+    """
+
+    if hasattr(
+        validated_event,
+        "to_dict",
+    ):
+        result = validated_event.to_dict()
+
+    elif hasattr(
+        validated_event,
+        "model_dump",
+    ):
+        result = validated_event.model_dump(
+            mode="json"
+        )
+
+    elif isinstance(
+        validated_event,
+        dict,
+    ):
+        result = validated_event
+
+    else:
+        raise PermanentEvidenceMessageError(
+            "Validated event has unsupported type"
+        )
+
+    if not isinstance(
+        result,
+        dict,
+    ):
+        raise PermanentEvidenceMessageError(
+            "Validated event is not an object"
+        )
+
+    return result
+
+
+def validate_and_normalize_event(
+    event: Any,
+) -> dict[str, Any]:
+    """
+    Validate and normalize a canonical event.
+
+    Validation failures are considered permanent message
+    failures and should be ACKed by the Redis consumer.
+    """
+
+    if not isinstance(
+        event,
+        dict,
+    ):
+        raise PermanentEvidenceMessageError(
+            "Event must be a dictionary"
+        )
+
+    try:
+        validated_event = validate_event(
+            event
+        )
+
+    except Exception as exc:
+        raise PermanentEvidenceMessageError(
+            f"Event validation failed: {exc}"
+        ) from exc
+
+    return convert_validated_event(
+        validated_event
+    )
+
+
+# ============================================================
 # INCIDENT CREATION
 # ============================================================
 
@@ -4889,44 +5101,22 @@ def create_incident_sync(
 
         agents.incident.main
 
-    It is NOT called by the Redis consumer service.
+    It is NOT called by the Redis evidence consumer service.
 
     Idempotency is based on alert_event_id.
     """
 
-    if not isinstance(event, dict):
+    if not isinstance(
+        event,
+        dict,
+    ):
         raise ValueError(
             "Event must be a dictionary"
         )
 
-    validated_event = validate_event(
+    event = validate_and_normalize_event(
         event
     )
-
-    if hasattr(
-        validated_event,
-        "to_dict",
-    ):
-        event = validated_event.to_dict()
-
-    elif hasattr(
-        validated_event,
-        "model_dump",
-    ):
-        event = validated_event.model_dump(
-            mode="json"
-        )
-
-    elif isinstance(
-        validated_event,
-        dict,
-    ):
-        event = validated_event
-
-    else:
-        raise ValueError(
-            "Validated event has unsupported type"
-        )
 
     event_type = event.get(
         "event_type"
@@ -5039,6 +5229,10 @@ def create_incident_sync(
         "hostname"
     )
 
+    source_redis_id = source.get(
+        "redis_id"
+    )
+
     person_count = safe_int(
         data.get(
             "person_count"
@@ -5051,23 +5245,26 @@ def create_incident_sync(
         )
     )
 
-    frame_id = safe_int(
-        data.get(
-            "frame_id"
-        )
+    frame_id_value = data.get("frame_id")
+    frame_id = (
+        str(frame_id_value)
+        if frame_id_value is not None
+        else None
     )
 
-    frame_timestamp = safe_float(
-        data.get(
-            "frame_timestamp"
-        )
+    frame_timestamp_value = data.get("frame_timestamp")
+    frame_timestamp = (
+        str(frame_timestamp_value)
+        if frame_timestamp_value is not None
+        else None
     )
 
     if frame_timestamp is None:
-        frame_timestamp = safe_float(
-            data.get(
-                "event_time"
-            )
+        event_time_value = data.get("event_time")
+        frame_timestamp = (
+            str(event_time_value)
+            if event_time_value is not None
+            else None
         )
 
     track_ids = normalize_track_ids(
@@ -5099,7 +5296,6 @@ def create_incident_sync(
     conn = get_database_connection()
 
     try:
-
         # --------------------------------------------------------
         # Idempotency lookup.
         # --------------------------------------------------------
@@ -5133,7 +5329,6 @@ def create_incident_sync(
         ).fetchone()
 
         if existing:
-
             existing_incident_id = existing[
                 "incident_id"
             ]
@@ -5150,12 +5345,17 @@ def create_incident_sync(
                         video_id,
                         ?
                     ),
+                    source_redis_id = COALESCE(
+                        source_redis_id,
+                        ?
+                    ),
                     updated_at = ?
                 WHERE incident_id = ?
                 """,
                 (
                     source_video,
                     video_id,
+                    source_redis_id,
                     now,
                     existing_incident_id,
                 ),
@@ -5187,7 +5387,6 @@ def create_incident_sync(
         # --------------------------------------------------------
 
         try:
-
             conn.execute(
                 """
                 INSERT INTO incidents (
@@ -5204,6 +5403,7 @@ def create_incident_sync(
                     source_agent_id,
                     source_instance_id,
                     source_hostname,
+                    source_redis_id,
                     person_count,
                     threshold,
                     frame_id,
@@ -5222,7 +5422,7 @@ def create_incident_sync(
                 VALUES (
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 """,
                 (
@@ -5239,6 +5439,7 @@ def create_incident_sync(
                     source_agent_id,
                     source_instance_id,
                     source_hostname,
+                    source_redis_id,
                     person_count,
                     threshold,
                     frame_id,
@@ -5259,7 +5460,6 @@ def create_incident_sync(
             conn.commit()
 
         except sqlite3.IntegrityError:
-
             conn.rollback()
 
             existing = conn.execute(
@@ -5317,10 +5517,54 @@ def create_incident_sync(
         conn.close()
 
 
+async def create_incident(
+    event: dict[str, Any],
+) -> dict[str, Any]:
+    return await asyncio.to_thread(
+        create_incident_sync,
+        event,
+    )
+
+
+async def acknowledge(
+    redis_id: str,
+) -> None:
+    await redis_client.xack(
+        STREAM_NAME,
+        GROUP_NAME,
+        redis_id,
+    )
+
+
+async def process_event(
+    redis_id: str,
+    fields: Any,
+) -> None:
+    normalized = normalize_fields(fields)
+    raw_event = normalized.get("event")
+
+    try:
+        if not raw_event:
+            raise ValueError("Redis message is missing 'event'.")
+
+        event = json.loads(raw_event)
+        event_type = event.get("event_type")
+
+        if event_type != "alert.created":
+            await acknowledge(redis_id)
+            return
+
+        await create_incident(event)
+        await acknowledge(redis_id)
+
+    except json.JSONDecodeError:
+        await acknowledge(redis_id)
+        return
+
+
 # ============================================================
 # EVIDENCE UPDATE
 # ============================================================
-
 
 
 def update_evidence_sync(
@@ -5330,76 +5574,77 @@ def update_evidence_sync(
     Apply an evidence.generated/evidence.failed event.
 
     The incident_id is taken from:
-        event.context.incident_id
 
-    Persists the complete evidence metadata:
-        - evidence_status
-        - evidence_type
-        - evidence_event_id
-        - proof_path
-        - proof_filename
-        - source_video
-        - start_time
-        - end_time
-        - evidence_duration
-        - evidence_reason
-        - evidence_updated_at
+        event.context.incident_id
 
     A completed evidence result cannot later be downgraded
     by a stale failure event.
+
+    If the incident does not yet exist, this function raises
+    RetryableEvidenceProcessingError rather than ValueError.
+
+    This prevents evidence from being ACKed and lost when
+    incident persistence and evidence generation race each other.
     """
 
-    if not isinstance(event, dict):
-        raise ValueError(
+    if not isinstance(
+        event,
+        dict,
+    ):
+        raise PermanentEvidenceMessageError(
             "Evidence event must be a dictionary"
         )
 
-    validated_event = validate_event(event)
-
-    if hasattr(validated_event, "to_dict"):
-        event = validated_event.to_dict()
-    elif hasattr(validated_event, "model_dump"):
-        event = validated_event.model_dump(
-            mode="json"
-        )
-    elif isinstance(validated_event, dict):
-        event = validated_event
-    else:
-        raise ValueError(
-            "Validated event has unsupported type"
-        )
-
-    event_type = event.get("event_type")
+    # Event has already been validated by parse_event().
+    event_type = event.get(
+        "event_type"
+    )
 
     if event_type not in SUPPORTED_EVIDENCE_EVENT_TYPES:
-        raise ValueError(
+        raise PermanentEvidenceMessageError(
             f"Unsupported evidence event type: {event_type}"
         )
 
-    context = event.get("context", {})
+    context = event.get(
+        "context",
+        {},
+    )
 
-    if not isinstance(context, dict):
+    if not isinstance(
+        context,
+        dict,
+    ):
         context = {}
 
-    incident_id = context.get("incident_id")
+    incident_id = context.get(
+        "incident_id"
+    )
 
     if not incident_id:
-        raise ValueError(
+        raise PermanentEvidenceMessageError(
             "Evidence event is missing "
             "context.incident_id"
         )
 
-    data = event.get("data", {})
+    data = event.get(
+        "data",
+        {},
+    )
 
-    if not isinstance(data, dict):
-        raise ValueError(
+    if not isinstance(
+        data,
+        dict,
+    ):
+        raise PermanentEvidenceMessageError(
             "Evidence event data must be an object"
         )
 
-    evidence_event_id = event.get("event_id")
+    evidence_event_id = event.get(
+        "event_id"
+    )
 
     if not evidence_event_id:
-        raise ValueError(
+        raise PermanentEvidenceMessageError(
             "Evidence event is missing event_id"
         )
 
@@ -5408,13 +5653,17 @@ def update_evidence_sync(
     # --------------------------------------------------------
 
     raw_status = str(
-        data.get("status", "")
+        data.get(
+            "status",
+            "",
+        )
     ).strip().upper()
 
     if event_type == "evidence.generated":
         status = (
             "FAILED"
-            if raw_status in {
+            if raw_status
+            in {
                 "FAILED",
                 "ERROR",
             }
@@ -5443,15 +5692,9 @@ def update_evidence_sync(
         "source_video"
     )
 
-    # Evidence generator may emit either:
-    #
-    #   duration
-    #
-    # or:
-    #
-    #   evidence_duration
-    #
-    # Support both.
+    video_id = data.get(
+        "video_id"
+    )
 
     evidence_duration = safe_float(
         data.get(
@@ -5466,17 +5709,6 @@ def update_evidence_sync(
             )
         )
 
-    # --------------------------------------------------------
-    # Evidence start/end time.
-    #
-    # These are allowed to be either:
-    #   - ISO timestamps
-    #   - numeric video-relative values
-    #
-    # Store them as TEXT because the DB schema defines
-    # start_time/end_time as TEXT.
-    # --------------------------------------------------------
-
     start_time = data.get(
         "start_time"
     )
@@ -5490,10 +5722,6 @@ def update_evidence_sync(
 
     if end_time is not None:
         end_time = str(end_time)
-
-    # --------------------------------------------------------
-    # Evidence failure reason.
-    # --------------------------------------------------------
 
     evidence_reason = data.get(
         "reason"
@@ -5534,6 +5762,7 @@ def update_evidence_sync(
                 proof_path,
                 proof_filename,
                 source_video,
+                video_id,
                 start_time,
                 end_time,
                 evidence_duration,
@@ -5545,10 +5774,15 @@ def update_evidence_sync(
             (incident_id,),
         ).fetchone()
 
+        # ----------------------------------------------------
+        # Incident-not-found is retryable.
+        # ----------------------------------------------------
+
         if not incident:
             conn.rollback()
-            raise ValueError(
-                f"Incident not found: {incident_id}"
+
+            raise RetryableEvidenceProcessingError(
+                f"Incident not found yet: {incident_id}"
             )
 
         current_status = str(
@@ -5584,7 +5818,8 @@ def update_evidence_sync(
             conn.execute(
                 """
                 UPDATE incidents
-                SET updated_at = ?
+                SET
+                    updated_at = ?
                 WHERE incident_id = ?
                 """,
                 (
@@ -5604,9 +5839,6 @@ def update_evidence_sync(
 
         # ----------------------------------------------------
         # Apply complete evidence result.
-        #
-        # COALESCE preserves useful existing values if an
-        # incoming event omits optional metadata.
         # ----------------------------------------------------
 
         conn.execute(
@@ -5635,6 +5867,11 @@ def update_evidence_sync(
                 source_video = COALESCE(
                     ?,
                     source_video
+                ),
+
+                video_id = COALESCE(
+                    ?,
+                    video_id
                 ),
 
                 start_time = COALESCE(
@@ -5667,6 +5904,7 @@ def update_evidence_sync(
                 proof_path,
                 proof_filename,
                 source_video,
+                video_id,
                 start_time,
                 end_time,
                 evidence_duration,
@@ -5688,11 +5926,16 @@ def update_evidence_sync(
             "proof_path": proof_path,
             "proof_filename": proof_filename,
             "source_video": source_video,
+            "video_id": video_id,
             "start_time": start_time,
             "end_time": end_time,
             "evidence_duration": evidence_duration,
             "evidence_reason": evidence_reason,
         }
+
+    except RetryableEvidenceProcessingError:
+        conn.rollback()
+        raise
 
     except Exception:
         conn.rollback()
@@ -5700,7 +5943,6 @@ def update_evidence_sync(
 
     finally:
         conn.close()
-
 
 
 # ============================================================
@@ -5714,11 +5956,10 @@ async def ensure_evidence_consumer_group() -> None:
     """
 
     try:
-
         await redis_client.xgroup_create(
             name=EVIDENCE_STREAM_NAME,
             groupname=EVIDENCE_GROUP_NAME,
-            id="0",
+            id="0-0",
             mkstream=True,
         )
 
@@ -5729,7 +5970,6 @@ async def ensure_evidence_consumer_group() -> None:
         )
 
     except Exception as exc:
-
         if "BUSYGROUP" in str(exc):
             return
 
@@ -5744,6 +5984,9 @@ async def ensure_evidence_consumer_group() -> None:
 async def acknowledge_evidence(
     redis_id: str,
 ) -> None:
+    """
+    ACK only after successful processing or permanent rejection.
+    """
 
     await redis_client.xack(
         EVIDENCE_STREAM_NAME,
@@ -5760,6 +6003,11 @@ async def acknowledge_evidence(
 def normalize_fields(
     fields: Any,
 ) -> dict[str, Any]:
+    """
+    Normalize Redis stream field keys and values.
+
+    Redis clients may return bytes depending on configuration.
+    """
 
     if not isinstance(
         fields,
@@ -5797,6 +6045,11 @@ def normalize_fields(
 def parse_event(
     fields: Any,
 ) -> dict[str, Any]:
+    """
+    Parse and validate a Redis stream message.
+
+    Validation happens exactly once on the Redis-consumer path.
+    """
 
     normalized = normalize_fields(
         fields
@@ -5807,7 +6060,7 @@ def parse_event(
     )
 
     if raw_event is None:
-        raise ValueError(
+        raise PermanentEvidenceMessageError(
             "Redis message missing event field"
         )
 
@@ -5824,16 +6077,13 @@ def parse_event(
         raw_event,
         str,
     ):
-
         try:
-
             event = json.loads(
                 raw_event
             )
 
         except json.JSONDecodeError as exc:
-
-            raise ValueError(
+            raise PermanentEvidenceMessageError(
                 f"Invalid event JSON: {exc}"
             ) from exc
 
@@ -5841,12 +6091,10 @@ def parse_event(
         raw_event,
         dict,
     ):
-
         event = raw_event
 
     else:
-
-        raise ValueError(
+        raise PermanentEvidenceMessageError(
             "Redis event must be JSON string or object"
         )
 
@@ -5854,36 +6102,12 @@ def parse_event(
         event,
         dict,
     ):
-        raise ValueError(
+        raise PermanentEvidenceMessageError(
             "Canonical event must be an object"
         )
 
-    validated = validate_event(
+    return validate_and_normalize_event(
         event
-    )
-
-    if hasattr(
-        validated,
-        "to_dict",
-    ):
-        return validated.to_dict()
-
-    if hasattr(
-        validated,
-        "model_dump",
-    ):
-        return validated.model_dump(
-            mode="json"
-        )
-
-    if isinstance(
-        validated,
-        dict,
-    ):
-        return validated
-
-    raise ValueError(
-        "Validated event has unsupported type"
     )
 
 
@@ -5902,15 +6126,20 @@ async def process_evidence_event(
     Permanent invalid payload:
         ACK.
 
+    Unsupported event type:
+        ACK.
+
     Successful update:
         ACK.
 
     Retryable processing failure:
         NO ACK.
+
+    Unexpected processing failure:
+        NO ACK.
     """
 
     try:
-
         event = parse_event(
             fields
         )
@@ -5920,7 +6149,6 @@ async def process_evidence_event(
         )
 
         if event_type not in SUPPORTED_EVIDENCE_EVENT_TYPES:
-
             print(
                 "[INCIDENT] Unsupported evidence event; "
                 f"ACKing redis_id={redis_id} "
@@ -5949,10 +6177,10 @@ async def process_evidence_event(
             redis_id
         )
 
-    except ValueError as exc:
+    except PermanentEvidenceMessageError as exc:
 
         print(
-            "[INCIDENT] Invalid evidence message; "
+            "[INCIDENT] Permanent invalid evidence message; "
             f"ACKing redis_id={redis_id} | "
             f"error={exc}"
         )
@@ -5960,6 +6188,21 @@ async def process_evidence_event(
         await acknowledge_evidence(
             redis_id
         )
+
+    except RetryableEvidenceProcessingError as exc:
+
+        print(
+            "[INCIDENT] Retryable evidence processing failure; "
+            f"redis_id={redis_id} | "
+            f"error={exc}"
+        )
+
+        # DO NOT ACK.
+        #
+        # Redis keeps the message pending so it can be retried
+        # or claimed by another healthy consumer.
+
+        return
 
     except asyncio.CancelledError:
         raise
@@ -5972,14 +6215,11 @@ async def process_evidence_event(
             f"{type(exc).__name__}: {exc}"
         )
 
-        # IMPORTANT:
+        # DO NOT ACK.
         #
-        # Do NOT ACK.
-        #
-        # Redis retains the message as pending so it can
-        # be recovered after failure.
+        # Unexpected failures remain pending for recovery.
 
-        raise
+        return
 
 
 # ============================================================
@@ -5989,13 +6229,21 @@ async def process_evidence_event(
 
 async def recover_pending_evidence() -> None:
     """
-    Recover evidence messages previously owned by this consumer.
+    Recover evidence messages previously owned by THIS consumer.
+
+    XREADGROUP with ID 0-0 reads pending messages assigned to
+    this consumer.
+
+    Once this consumer's own pending entries are exhausted,
+    the function returns.
+
+    Redis consumer-group semantics intentionally keep unacked
+    messages in the Pending Entries List (PEL).
     """
 
     while True:
 
         try:
-
             messages = await redis_client.xreadgroup(
                 groupname=EVIDENCE_GROUP_NAME,
                 consumername=EVIDENCE_CONSUMER_NAME,
@@ -6037,7 +6285,6 @@ async def recover_pending_evidence() -> None:
                 processed = True
 
                 try:
-
                     await process_evidence_event(
                         redis_id,
                         fields,
@@ -6066,54 +6313,28 @@ async def recover_pending_evidence() -> None:
 async def recover_stale_evidence() -> None:
     """
     Claim stale evidence messages from failed consumers.
+
+    IMPORTANT:
+
+    XAUTOCLAIM returns a cursor. We must continue scanning using
+    that cursor until the scan reaches 0-0, otherwise a large
+    Pending Entries List may not be fully examined.
+
+    The messages are then processed by this healthy consumer.
     """
 
-    try:
+    cursor = "0-0"
 
-        result = await redis_client.xautoclaim(
-            EVIDENCE_STREAM_NAME,
-            EVIDENCE_GROUP_NAME,
-            EVIDENCE_CONSUMER_NAME,
-            min_idle_time=PENDING_CLAIM_IDLE_MS,
-            start_id="0-0",
-            count=READ_COUNT,
-        )
-
-    except asyncio.CancelledError:
-        raise
-
-    except Exception as exc:
-
-        print(
-            "[INCIDENT] Evidence XAUTOCLAIM failed: "
-            f"{type(exc).__name__}: {exc}"
-        )
-
-        return
-
-    if not result or len(result) < 2:
-        return
-
-    claimed = result[1]
-
-    if not claimed:
-        return
-
-    print(
-        "[INCIDENT] Recovered "
-        f"{len(claimed)} stale evidence message(s)"
-    )
-
-    for (
-        redis_id,
-        fields,
-    ) in claimed:
+    while True:
 
         try:
-
-            await process_evidence_event(
-                redis_id,
-                fields,
+            result = await redis_client.xautoclaim(
+                EVIDENCE_STREAM_NAME,
+                EVIDENCE_GROUP_NAME,
+                EVIDENCE_CONSUMER_NAME,
+                min_idle_time=PENDING_CLAIM_IDLE_MS,
+                start_id=cursor,
+                count=READ_COUNT,
             )
 
         except asyncio.CancelledError:
@@ -6122,10 +6343,55 @@ async def recover_stale_evidence() -> None:
         except Exception as exc:
 
             print(
-                "[INCIDENT] Recovered evidence failed: "
-                f"redis_id={redis_id} | "
+                "[INCIDENT] Evidence XAUTOCLAIM failed: "
                 f"{type(exc).__name__}: {exc}"
             )
+
+            return
+
+        if not result or len(result) < 2:
+            return
+
+        next_cursor = result[0]
+        claimed = result[1]
+
+        if claimed:
+            print(
+                "[INCIDENT] Recovered "
+                f"{len(claimed)} stale evidence message(s)"
+            )
+
+            for (
+                redis_id,
+                fields,
+            ) in claimed:
+
+                try:
+                    await process_evidence_event(
+                        redis_id,
+                        fields,
+                    )
+
+                except asyncio.CancelledError:
+                    raise
+
+                except Exception as exc:
+
+                    print(
+                        "[INCIDENT] Recovered evidence failed: "
+                        f"redis_id={redis_id} | "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+
+        # Redis signals that the scan is complete by returning
+        # 0-0 as the next cursor.
+        if next_cursor in (
+            "0-0",
+            b"0-0",
+        ):
+            return
+
+        cursor = next_cursor
 
 
 # ============================================================
@@ -6148,6 +6414,8 @@ async def evidence_consumer_loop() -> None:
 
     await ensure_evidence_consumer_group()
 
+    # Recover messages that were pending under this consumer
+    # before a previous process shutdown/restart.
     await recover_pending_evidence()
 
     print(
@@ -6159,10 +6427,17 @@ async def evidence_consumer_loop() -> None:
 
     while True:
 
+        # ----------------------------------------------------
+        # Recover stale messages from failed consumers.
+        # ----------------------------------------------------
+
         await recover_stale_evidence()
 
-        try:
+        # ----------------------------------------------------
+        # Read new evidence messages.
+        # ----------------------------------------------------
 
+        try:
             messages = await redis_client.xreadgroup(
                 groupname=EVIDENCE_GROUP_NAME,
                 consumername=EVIDENCE_CONSUMER_NAME,
@@ -6203,7 +6478,6 @@ async def evidence_consumer_loop() -> None:
             ) in stream_messages:
 
                 try:
-
                     await process_evidence_event(
                         redis_id,
                         fields,
@@ -6270,7 +6544,6 @@ async def consume_events() -> None:
     )
 
     try:
-
         await evidence_task
 
     except asyncio.CancelledError:

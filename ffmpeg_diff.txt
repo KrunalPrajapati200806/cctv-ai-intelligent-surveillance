@@ -1,0 +1,358 @@
+diff --git a/agents/evidence/ffmpeg.py b/agents/evidence/ffmpeg.py
+index 1191a90..8c28249 100644
+--- a/agents/evidence/ffmpeg.py
++++ b/agents/evidence/ffmpeg.py
+@@ -1,353 +1,3 @@
+-# """
+-# Evidence Agent - FFmpeg Utilities
+-# =================================
+-
+-# Responsible only for video transcoding operations used by the
+-# Evidence Agent.
+-
+-# This module deliberately contains no:
+-# - FastAPI code
+-# - Redis code
+-# - incident logic
+-# - YOLO inference
+-# - camera logic
+-# - historical-analysis logic
+-
+-# Design goals:
+-# - isolated utility
+-# - deterministic behavior
+-# - atomic final-file replacement
+-# - clear failures for the supervisor/evidence worker
+-# - no partial final evidence files
+-# """
+-
+-# from __future__ import annotations
+-
+-# import os
+-# import shutil
+-# import subprocess
+-# from pathlib import Path
+-
+-
+-# # ============================================================
+-# # CONFIGURATION
+-# # ============================================================
+-
+-# DEFAULT_PRESET = "fast"
+-# DEFAULT_CRF = "23"
+-# DEFAULT_PIXEL_FORMAT = "yuv420p"
+-# DEFAULT_PROFILE = "main"
+-# DEFAULT_LEVEL = "3.0"
+-
+-
+-# # ============================================================
+-# # FFMPEG DISCOVERY
+-# # ============================================================
+-
+-# def get_ffmpeg_binary() -> str | None:
+-#     """
+-#     Return the configured FFmpeg executable.
+-
+-#     Priority:
+-#         1. FFMPEG_BIN environment variable
+-#         2. ffmpeg available on PATH
+-
+-#     Returns:
+-#         Absolute/configured executable path, or None if unavailable.
+-#     """
+-
+-#     configured = os.getenv("FFMPEG_BIN")
+-
+-#     if configured:
+-#         configured_path = Path(configured).expanduser()
+-
+-#         if configured_path.exists():
+-#             return str(configured_path)
+-
+-#         # Allow a command name such as "ffmpeg".
+-#         resolved = shutil.which(configured)
+-
+-#         if resolved:
+-#             return resolved
+-
+-#         return None
+-
+-#     return shutil.which("ffmpeg")
+-
+-
+-# def require_ffmpeg() -> str:
+-#     """
+-#     Return the FFmpeg executable or raise a clear error.
+-#     """
+-
+-#     ffmpeg = get_ffmpeg_binary()
+-
+-#     if not ffmpeg:
+-#         raise RuntimeError(
+-#             "FFmpeg is not available. "
+-#             "Install FFmpeg or set FFMPEG_BIN to ffmpeg.exe."
+-#         )
+-
+-#     return ffmpeg
+-
+-
+-# # ============================================================
+-# # VALIDATION
+-# # ============================================================
+-
+-# def _validate_input_file(path: Path, name: str) -> None:
+-#     """
+-#     Validate that an input file exists and is non-empty.
+-#     """
+-
+-#     if not isinstance(path, Path):
+-#         raise TypeError(
+-#             f"{name} must be a pathlib.Path instance."
+-#         )
+-
+-#     if not path.exists():
+-#         raise FileNotFoundError(
+-#             f"{name} does not exist: {path}"
+-#         )
+-
+-#     if not path.is_file():
+-#         raise RuntimeError(
+-#             f"{name} is not a file: {path}"
+-#         )
+-
+-#     try:
+-#         size = path.stat().st_size
+-#     except OSError as exc:
+-#         raise RuntimeError(
+-#             f"Could not inspect {name}: {path}"
+-#         ) from exc
+-
+-#     if size <= 0:
+-#         raise RuntimeError(
+-#             f"{name} is empty: {path}"
+-#         )
+-
+-
+-# def _prepare_output_path(final_path: Path) -> None:
+-#     """
+-#     Ensure the output directory exists.
+-#     """
+-
+-#     if not isinstance(final_path, Path):
+-#         raise TypeError(
+-#             "final_path must be a pathlib.Path instance."
+-#         )
+-
+-#     final_path.parent.mkdir(
+-#         parents=True,
+-#         exist_ok=True,
+-#     )
+-
+-
+-# # ============================================================
+-# # H.264 CONVERSION
+-# # ============================================================
+-
+-# def convert_to_h264(
+-#     raw_path: Path,
+-#     final_path: Path,
+-#     *,
+-#     preset: str = DEFAULT_PRESET,
+-#     crf: str = DEFAULT_CRF,
+-# ) -> Path:
+-#     """
+-#     Convert a temporary video into H.264 MP4.
+-
+-#     The conversion is atomic:
+-
+-#         raw.mp4
+-#             |
+-#             v
+-#         FFmpeg
+-#             |
+-#             v
+-#         *_h264_tmp.mp4
+-#             |
+-#             v
+-#         os.replace()
+-#             |
+-#             v
+-#         final.mp4
+-
+-#     The final destination is never intentionally left as a partially
+-#     encoded file.
+-
+-#     Args:
+-#         raw_path:
+-#             Temporary source video.
+-
+-#         final_path:
+-#             Final H.264 MP4 path.
+-
+-#         preset:
+-#             FFmpeg x264 encoding preset.
+-
+-#         crf:
+-#             x264 constant-rate-factor value.
+-
+-#     Returns:
+-#         final_path
+-
+-#     Raises:
+-#         FileNotFoundError:
+-#             Input does not exist.
+-
+-#         RuntimeError:
+-#             FFmpeg unavailable, conversion failed, or output invalid.
+-#     """
+-
+-#     raw_path = Path(raw_path)
+-#     final_path = Path(final_path)
+-
+-#     _validate_input_file(
+-#         raw_path,
+-#         "raw_path",
+-#     )
+-
+-#     _prepare_output_path(
+-#         final_path,
+-#     )
+-
+-#     ffmpeg = require_ffmpeg()
+-
+-#     temp_h264 = final_path.with_name(
+-#         f"{final_path.stem}_h264_tmp.mp4"
+-#     )
+-
+-#     command = [
+-#         ffmpeg,
+-#         "-y",
+-#         "-hide_banner",
+-#         "-loglevel",
+-#         "error",
+-#         "-i",
+-#         str(raw_path),
+-#         "-an",
+-#         "-c:v",
+-#         "libx264",
+-#         "-preset",
+-#         str(preset),
+-#         "-crf",
+-#         str(crf),
+-#         "-pix_fmt",
+-#         DEFAULT_PIXEL_FORMAT,
+-#         "-profile:v",
+-#         DEFAULT_PROFILE,
+-#         "-level:v",
+-#         DEFAULT_LEVEL,
+-#         "-movflags",
+-#         "+faststart",
+-#         str(temp_h264),
+-#     ]
+-
+-#     try:
+-#         subprocess.run(
+-#             command,
+-#             check=True,
+-#             capture_output=True,
+-#             text=True,
+-#         )
+-
+-#         if (
+-#             not temp_h264.exists()
+-#             or temp_h264.stat().st_size <= 0
+-#         ):
+-#             raise RuntimeError(
+-#                 "FFmpeg completed but did not create "
+-#                 "a valid H.264 output file."
+-#             )
+-
+-#         # Atomic replacement of the final evidence file.
+-#         os.replace(
+-#             temp_h264,
+-#             final_path,
+-#         )
+-
+-#         return final_path
+-
+-#     except subprocess.CalledProcessError as exc:
+-#         stderr = (
+-#             exc.stderr or ""
+-#         ).strip()
+-
+-#         message = (
+-#             "FFmpeg H.264 conversion failed"
+-#         )
+-
+-#         if stderr:
+-#             message += f": {stderr}"
+-
+-#         raise RuntimeError(message) from exc
+-
+-#     except OSError as exc:
+-#         raise RuntimeError(
+-#             f"Could not finalize H.264 evidence file: "
+-#             f"{final_path}"
+-#         ) from exc
+-
+-#     finally:
+-#         # Never leave an intermediate H.264 file behind.
+-#         if temp_h264.exists():
+-#             try:
+-#                 temp_h264.unlink()
+-#             except OSError:
+-#                 pass
+-
+-
+-# # ============================================================
+-# # BACKWARD-COMPATIBLE NAME
+-# # ============================================================
+-
+-# def convert_proof_to_h264(
+-#     raw_path: Path,
+-#     final_path: Path,
+-# ) -> None:
+-#     """
+-#     Backward-compatible wrapper for the existing proof-video code.
+-
+-#     Existing historical-analysis code can continue using the old
+-#     function name while the Evidence Agent migrates to
+-#     convert_to_h264().
+-#     """
+-
+-#     convert_to_h264(
+-#         raw_path=Path(raw_path),
+-#         final_path=Path(final_path),
+-#     )
+-
+-
+-# # ============================================================
+-# # PUBLIC API
+-# # ============================================================
+-
+-# __all__ = [
+-#     "get_ffmpeg_binary",
+-#     "require_ffmpeg",
+-#     "convert_to_h264",
+-#     "convert_proof_to_h264",
+-# ]
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+ """
+ FFmpeg utilities for CCTV evidence generation.
+ 
